@@ -30,7 +30,9 @@ pub fn run_server(config: config::Config) -> Result<(), std::io::Error> {
                 if seg.get_flag(Flag::SYN) {
                     println!("GOT SYN");
                     tcb.state = TCBState::SYN_RECD;
-                    let reply = Segment::new(config.port, tcb.tuple.src_port);
+                    let mut reply = Segment::new(config.port, tcb.tuple.src_port);
+                    reply.set_flag(Flag::SYN);
+                    reply.set_flag(Flag::ACK);
                     let bytes = reply.to_byte_vec();
                     let target = tcb.target_addr();
                     socket.send_to(&bytes[..], &target).unwrap();
@@ -38,14 +40,14 @@ pub fn run_server(config: config::Config) -> Result<(), std::io::Error> {
             }
             TCBState::SYN_SENT => {}
             TCBState::SYN_RECD => {
-                if seg.get_flag(Flag::SYN) {
+                if seg.get_flag(Flag::ACK) {
+                    println!("ESTAB!");
                     tcb.state = TCBState::ESTAB;
+                    break 'event_loop;
                 }
             }
             TCBState::ESTAB => {}
         };
-
-        break 'event_loop;
     }
 
     Ok(())
@@ -76,6 +78,20 @@ pub fn run_client(config: config::Config) -> Result<(), std::io::Error> {
     let amt = socket
         .send_to(&*bytes, format!("127.0.0.1:{}", config.port))
         .unwrap();
-    println!("Sent {} bytes with checksum {}", amt, syn.checksum);
+
+    let mut buf = vec![0; (1 << 16) - 1];
+    let (amt, src): (usize, SocketAddr) = socket.recv_from(&mut buf).unwrap();
+    let buf = Vec::from(&mut buf[..amt]);
+    let seg = Segment::from_buf(buf);
+    assert!(seg.get_flag(Flag::ACK));
+    println!("Received SYN ACK: {:?}", seg);
+
+    let mut syn = Segment::new(socket.local_addr().unwrap().port(), config.port);
+    syn.set_flag(Flag::ACK);
+    let bytes = syn.to_byte_vec();
+    let amt = socket
+        .send_to(&*bytes, format!("127.0.0.1:{}", config.port))
+        .unwrap();
+    println!("Sent ACK");
     Ok(())
 }
