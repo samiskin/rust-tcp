@@ -50,6 +50,14 @@ impl TCB {
     pub fn target_addr(&self) -> SocketAddr {
         SocketAddr::new(self.tuple.src_ip, self.tuple.src_port)
     }
+
+    pub fn reset(&mut self) {
+        unsafe {
+            TCB_COUNT += 1;
+        }
+        self.id = unsafe { TCB_COUNT };
+        self.state = TCBState::LISTEN;
+    }
 }
 
 #[cfg(test)]

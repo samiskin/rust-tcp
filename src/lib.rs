@@ -43,10 +43,15 @@ pub fn run_server(config: config::Config) -> Result<(), std::io::Error> {
                 if seg.get_flag(Flag::ACK) {
                     println!("ESTAB!");
                     tcb.state = TCBState::ESTAB;
+                }
+            }
+            TCBState::ESTAB => {
+                if seg.get_flag(Flag::FIN) {
+                    tcb.reset();
+                    println!("CLOSED!");
                     break 'event_loop;
                 }
             }
-            TCBState::ESTAB => {}
         };
     }
 
@@ -86,12 +91,20 @@ pub fn run_client(config: config::Config) -> Result<(), std::io::Error> {
     assert!(seg.get_flag(Flag::ACK));
     println!("Received SYN ACK: {:?}", seg);
 
-    let mut syn = Segment::new(socket.local_addr().unwrap().port(), config.port);
-    syn.set_flag(Flag::ACK);
-    let bytes = syn.to_byte_vec();
+    let mut ack = Segment::new(socket.local_addr().unwrap().port(), config.port);
+    ack.set_flag(Flag::ACK);
+    let bytes = ack.to_byte_vec();
     let amt = socket
         .send_to(&*bytes, format!("127.0.0.1:{}", config.port))
         .unwrap();
     println!("Sent ACK");
+
+    let mut fin = Segment::new(socket.local_addr().unwrap().port(), config.port);
+    fin.set_flag(Flag::FIN);
+    let bytes = fin.to_byte_vec();
+    let amt = socket
+        .send_to(&*bytes, format!("127.0.0.1:{}", config.port))
+        .unwrap();
+    println!("Sent FIN");
     Ok(())
 }
