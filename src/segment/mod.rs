@@ -1,3 +1,5 @@
+use std::net::*;
+
 #[derive(Debug, Clone)]
 pub struct Segment {
     src_port: u16,
@@ -33,6 +35,14 @@ pub enum Flag {
     FIN,
 }
 
+fn buf_to_u16(buf: &[u8]) -> u16 {
+    (buf[0] as u16) << 8 | (buf[1] as u16)
+}
+
+fn buf_to_u32(buf: &[u8]) -> u32 {
+    (buf_to_u16(&buf[0..2]) as u32) << 16 | (buf_to_u16(&buf[2..4]) as u32)
+}
+
 impl Segment {
     pub fn new() -> Segment {
         Segment {
@@ -47,6 +57,19 @@ impl Segment {
         }
     }
 
+    pub fn from_buf(buf: Vec<u8>) -> Segment {
+        Segment {
+            src_port: buf_to_u16(&buf[0..2]),
+            dest_port: buf_to_u16(&buf[2..4]),
+            seg_size: buf_to_u32(&buf[4..8]),
+            seq_num: buf_to_u32(&buf[8..12]),
+            ack_num: buf_to_u32(&buf[12..16]),
+            flags: buf_to_u16(&buf[16..20]),
+            checksum: buf_to_u16(&buf[20..24]),
+            payload: Vec::from(&buf[24..]).into_boxed_slice(),
+        }
+    }
+
     pub fn set_flag(&mut self, flag: Flag) {
         self.flags |= 1 <<
             match flag {
@@ -55,6 +78,26 @@ impl Segment {
                 Flag::FIN => 13,
             };
         self.checksum = self.generate_checksum();
+    }
+
+    pub fn unset_flag(&mut self, flag: Flag) {
+        let mut flipped = !self.flags;
+        flipped |= 1 <<
+            match flag {
+                Flag::SYN => 15,
+                Flag::ACK => 14,
+                Flag::FIN => 13,
+            };
+        self.flags = !flipped;
+        self.checksum = self.generate_checksum();
+    }
+
+    pub fn get_flag(&self, flag: Flag) -> bool {
+        match flag {
+            Flag::SYN => self.flags & 1 << 15 > 0,
+            Flag::ACK => self.flags & 1 << 14 > 0,
+            Flag::FIN => self.flags & 1 << 13 > 0,
+        }
     }
 
     pub fn set_data(&mut self, data: Vec<u8>) {
@@ -144,5 +187,27 @@ mod tests {
         assert!(seg.validate());
         seg.flags |= 0b00010;
         assert!(!seg.validate());
+    }
+
+    #[test]
+    fn flags() {
+        let mut seg = Segment::new();
+        let get_flags = |seg: &Segment| {
+            (
+                seg.get_flag(Flag::SYN),
+                seg.get_flag(Flag::ACK),
+                seg.get_flag(Flag::FIN),
+            )
+        };
+        assert_eq!(get_flags(&seg), (false, false, false));
+        seg.set_flag(Flag::SYN);
+        assert_eq!(get_flags(&seg), (true, false, false));
+        seg.set_flag(Flag::FIN);
+        assert_eq!(get_flags(&seg), (true, false, true));
+        seg.set_flag(Flag::ACK);
+        assert_eq!(get_flags(&seg), (true, true, true));
+        seg.unset_flag(Flag::SYN);
+        assert_eq!(get_flags(&seg), (false, true, true));
+        assert!(seg.validate());
     }
 }
