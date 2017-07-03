@@ -3,13 +3,23 @@ use std::net::*;
 #[derive(Debug, Clone)]
 pub struct Segment {
     src_port: u16,
-    dest_port: u16,
+    dst_port: u16,
     seg_size: u32,
     seq_num: u32,
     ack_num: u32,
     flags: u16,
     checksum: u16,
     payload: Box<[u8]>,
+}
+
+impl Segment {
+    pub fn src_port(&self) -> u16 {
+        self.src_port
+    }
+
+    pub fn dst_port(&self) -> u16 {
+        self.dst_port
+    }
 }
 
 use std::fmt::{Binary, Formatter, Error};
@@ -47,7 +57,7 @@ impl Segment {
     pub fn new() -> Segment {
         Segment {
             src_port: 0,
-            dest_port: 0,
+            dst_port: 0,
             seg_size: 0,
             seq_num: 0,
             ack_num: 0,
@@ -60,7 +70,7 @@ impl Segment {
     pub fn from_buf(buf: Vec<u8>) -> Segment {
         Segment {
             src_port: buf_to_u16(&buf[0..2]),
-            dest_port: buf_to_u16(&buf[2..4]),
+            dst_port: buf_to_u16(&buf[2..4]),
             seg_size: buf_to_u32(&buf[4..8]),
             seq_num: buf_to_u32(&buf[8..12]),
             ack_num: buf_to_u32(&buf[12..16]),
@@ -116,7 +126,7 @@ impl Segment {
         };
 
         let mut set = u16_to_u8(self.src_port);
-        set.extend(u16_to_u8(self.dest_port).iter());
+        set.extend(u16_to_u8(self.dst_port).iter());
         set.extend(u32_to_u8(self.seg_size).iter());
         set.extend(u32_to_u8(self.seq_num).iter());
         set.extend(u32_to_u8(self.ack_num).iter());
@@ -171,7 +181,7 @@ mod tests {
     fn checksum() {
         let mut seg = Segment::new();
         seg.src_port = 2;
-        seg.dest_port = 5;
+        seg.dst_port = 5;
         seg.seq_num = 32 + (32 << 16);
         seg.flags = 4;
         let data: Vec<u8> = vec![2, 4, 6, 8];
