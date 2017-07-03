@@ -6,56 +6,46 @@ pub mod conn;
 use segment::*;
 use conn::*;
 use std::collections::HashMap;
+use std::time::Duration;
+use std::time::SystemTime;
 
 pub fn run_server(config: config::Config) -> Result<(), std::io::Error> {
     println!("Starting Server...");
 
-    let socket = UdpSocket::bind(format!("127.0.0.1:{}", config.port)).unwrap();
     let mut tcbs: HashMap<TCPTuple, TCB> = HashMap::new();
+    let socket = UdpSocket::bind(format!("127.0.0.1:{}", config.port)).unwrap();
+
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
 
     'event_loop: loop {
         let mut buf = vec![0; (1 << 16) - 1];
-        let (amt, src): (usize, SocketAddr) = socket.recv_from(&mut buf).unwrap();
-        let buf = Vec::from(&mut buf[..amt]);
-        let seg = Segment::from_buf(buf);
-        println!("Received {} bytes with checksum {}", amt, seg.checksum);
-        assert!(seg.validate()); // TODO: Replace
-        let tuple = TCPTuple::from(&seg, &src);
+        match socket.recv_from(&mut buf) {
+            Ok((amt, src)) => {
+                let buf = Vec::from(&mut buf[..amt]);
+                let seg = Segment::from_buf(buf);
+                println!("Received {} bytes with checksum {}", amt, seg.checksum);
+                if !seg.validate() {
+                    println!("Corrupted packet!");
+                    continue 'event_loop;
+                }
+                let tuple = TCPTuple::from(config.port, &src);
+                let tcb: &mut TCB = tcbs.entry(tuple).or_insert(TCB::new(
+                    tuple,
+                    socket.try_clone().unwrap(),
+                ));
 
-        let tcb: &mut TCB = tcbs.entry(tuple).or_insert(TCB::from(tuple));
-        println!("Using TCB: {:?}", tcb);
-
-        match tcb.state {
-            TCBState::LISTEN => {
-                if seg.get_flag(Flag::SYN) {
-                    println!("GOT SYN");
-                    tcb.state = TCBState::SYN_RECD;
-                    let mut reply = Segment::new(config.port, tcb.tuple.src_port);
-                    reply.set_flag(Flag::SYN);
-                    reply.set_flag(Flag::ACK);
-                    let bytes = reply.to_byte_vec();
-                    let target = tcb.target_addr();
-                    socket.send_to(&bytes[..], &target).unwrap();
-                }
+                tcb.handle_segment(seg);
             }
-            TCBState::SYN_SENT => {}
-            TCBState::SYN_RECD => {
-                if seg.get_flag(Flag::ACK) {
-                    println!("ESTAB!");
-                    tcb.state = TCBState::ESTAB;
-                }
-            }
-            TCBState::ESTAB => {
-                if seg.get_flag(Flag::FIN) {
-                    tcb.reset();
-                    println!("CLOSED!");
-                    break 'event_loop;
-                }
-            }
+            Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => panic!(err),
         };
-    }
 
-    Ok(())
+        for tcb in tcbs.values_mut() {
+            tcb.check_timeout();
+        }
+    }
 }
 
 
@@ -92,6 +82,7 @@ pub fn run_client(config: config::Config) -> Result<(), std::io::Error> {
     println!("Received SYN ACK: {:?}", seg);
 
     let mut ack = Segment::new(socket.local_addr().unwrap().port(), config.port);
+    ack.seq_num = 1;
     ack.set_flag(Flag::ACK);
     let bytes = ack.to_byte_vec();
     let amt = socket
@@ -100,6 +91,7 @@ pub fn run_client(config: config::Config) -> Result<(), std::io::Error> {
     println!("Sent ACK");
 
     let mut fin = Segment::new(socket.local_addr().unwrap().port(), config.port);
+    fin.seq_num = 2;
     fin.set_flag(Flag::FIN);
     let bytes = fin.to_byte_vec();
     let amt = socket
