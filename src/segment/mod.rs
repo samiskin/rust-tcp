@@ -2,24 +2,14 @@ use std::net::*;
 
 #[derive(Debug, Clone)]
 pub struct Segment {
-    src_port: u16,
-    dst_port: u16,
-    seg_size: u32,
-    seq_num: u32,
-    ack_num: u32,
-    flags: u16,
-    checksum: u16,
-    payload: Box<[u8]>,
-}
-
-impl Segment {
-    pub fn src_port(&self) -> u16 {
-        self.src_port
-    }
-
-    pub fn dst_port(&self) -> u16 {
-        self.dst_port
-    }
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seg_size: u32,
+    pub seq_num: u32,
+    pub ack_num: u32,
+    pub flags: u16,
+    pub checksum: u16,
+    pub payload: Box<[u8]>,
 }
 
 use std::fmt::{Binary, Formatter, Error};
@@ -54,29 +44,41 @@ fn buf_to_u32(buf: &[u8]) -> u32 {
 }
 
 impl Segment {
-    pub fn new() -> Segment {
-        Segment {
-            src_port: 0,
-            dst_port: 0,
-            seg_size: 0,
+    pub fn src_port(&self) -> u16 {
+        self.src_port
+    }
+
+    pub fn dst_port(&self) -> u16 {
+        self.dst_port
+    }
+
+    pub fn new(src_port: u16, dst_port: u16) -> Segment {
+        let mut base = Segment {
+            src_port: src_port,
+            dst_port: dst_port,
+            seg_size: 20,
             seq_num: 0,
             ack_num: 0,
             flags: 0,
             checksum: 0,
             payload: Box::new([]),
-        }
+        };
+        base.checksum = base.generate_checksum();
+        base
     }
 
     pub fn from_buf(buf: Vec<u8>) -> Segment {
+        println!("Buf: {:?}", buf);
+        assert!(buf.len() >= 20);
         Segment {
             src_port: buf_to_u16(&buf[0..2]),
             dst_port: buf_to_u16(&buf[2..4]),
             seg_size: buf_to_u32(&buf[4..8]),
             seq_num: buf_to_u32(&buf[8..12]),
             ack_num: buf_to_u32(&buf[12..16]),
-            flags: buf_to_u16(&buf[16..20]),
-            checksum: buf_to_u16(&buf[20..24]),
-            payload: Vec::from(&buf[24..]).into_boxed_slice(),
+            flags: buf_to_u16(&buf[16..18]),
+            checksum: buf_to_u16(&buf[18..20]),
+            payload: Vec::from(&buf[20..]).into_boxed_slice(),
         }
     }
 
@@ -111,11 +113,12 @@ impl Segment {
     }
 
     pub fn set_data(&mut self, data: Vec<u8>) {
+        self.seg_size = 20 + data.len() as u32;
         self.payload = data.into_boxed_slice();
         self.checksum = self.generate_checksum();
     }
 
-    fn to_byte_vec(&self) -> Vec<u8> {
+    pub fn to_byte_vec(&self) -> Vec<u8> {
         let u16_to_u8 = |v: u16| vec![(v >> 8) as u8, (v & 0xff) as u8];
         let u32_to_u16 = |v: u32| vec![(v >> 16) as u16, (v & 0xffff) as u16];
         let u32_to_u8 = |v: u32| {
@@ -178,8 +181,16 @@ impl Segment {
 mod tests {
     use super::*;
     #[test]
+    fn seg_size() {
+        let mut seg = Segment::new(0, 0);
+        let data: Vec<u8> = vec![2, 4, 6, 8];
+        seg.set_data(data);
+        assert_eq!(seg.seg_size, 24);
+    }
+
+    #[test]
     fn checksum() {
-        let mut seg = Segment::new();
+        let mut seg = Segment::new(0, 0);
         seg.src_port = 2;
         seg.dst_port = 5;
         seg.seq_num = 32 + (32 << 16);
@@ -187,7 +198,7 @@ mod tests {
         let data: Vec<u8> = vec![2, 4, 6, 8];
         seg.set_data(data);
 
-        assert_eq!(seg.checksum, 63400);
+        assert_eq!(seg.checksum, 63376);
 
         let old_checksum = seg.checksum;
         seg.set_flag(Flag::SYN);
@@ -201,7 +212,7 @@ mod tests {
 
     #[test]
     fn flags() {
-        let mut seg = Segment::new();
+        let mut seg = Segment::new(0, 0);
         let get_flags = |seg: &Segment| {
             (
                 seg.get_flag(Flag::SYN),

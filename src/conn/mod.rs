@@ -2,7 +2,7 @@ use std::net::*;
 use segment::*;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-enum State {
+pub enum TCBState {
     LISTEN,
     SYN_SENT,
     SYN_RECD,
@@ -11,9 +11,9 @@ enum State {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct TCPTuple {
-    src_port: u16,
-    src_ip: IpAddr,
-    dst_port: u16,
+    pub src_port: u16,
+    pub src_ip: IpAddr,
+    pub dst_port: u16,
 }
 
 impl TCPTuple {
@@ -30,9 +30,9 @@ static mut TCB_COUNT: u32 = 0;
 
 #[derive(Debug)]
 pub struct TCB {
-    id: u32,
-    state: State,
-    tuple: TCPTuple,
+    pub id: u32,
+    pub state: TCBState,
+    pub tuple: TCPTuple,
 }
 
 impl TCB {
@@ -42,9 +42,13 @@ impl TCB {
         }
         TCB {
             id: unsafe { TCB_COUNT },
-            state: State::LISTEN,
+            state: TCBState::LISTEN,
             tuple: tuple,
         }
+    }
+
+    pub fn target_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.tuple.src_ip, self.tuple.src_port)
     }
 }
 
@@ -53,7 +57,7 @@ mod tests {
     use super::*;
     #[test]
     fn tcb() {
-        let s = Segment::new();
+        let s = Segment::new(0, 0);
         let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080);
         let tuple = TCPTuple::from(&s, &src);
         let tcb = TCB::from(tuple);
@@ -61,6 +65,6 @@ mod tests {
         let tcb2 = TCB::from(tuple);
         assert_eq!(tcb2.id, 2);
 
-        assert_eq!(tcb.state, State::LISTEN);
+        assert_eq!(tcb.state, TCBState::LISTEN);
     }
 }
