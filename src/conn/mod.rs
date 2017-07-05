@@ -3,11 +3,26 @@ use segment::*;
 use std::time::SystemTime;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TCBEvent {
+    ESTAB,
+    SEND_COMPLETION,
+    RECV_COMPLETION,
+    CLOSED,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum RDTState {
+    IDLE,
+    SENDING, // remaining
+    RECEIVING, // remaining
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TCBState {
     LISTEN,
     SYN_SENT,
     SYN_RECD,
-    ESTAB,
+    ESTAB(RDTState),
     CLOSED,
 }
 
@@ -29,6 +44,7 @@ impl TCPTuple {
 }
 
 static mut TCB_COUNT: u32 = 0;
+static WINDOW_SIZE: u32 = 1;
 
 #[derive(Debug)]
 pub struct TCB {
@@ -38,6 +54,12 @@ pub struct TCB {
     pub expected_seq: u32,
     pub timeout: SystemTime,
     pub sock: UdpSocket,
+
+    pub recv_buffer: Vec<u8>,
+    pub send_buffer: Vec<u8>,
+
+    recv_remaining: u32,
+    send_base: u32, // Base seg number
 }
 
 impl TCB {
@@ -52,6 +74,10 @@ impl TCB {
             expected_seq: 0,
             timeout: SystemTime::now(),
             sock: sock,
+            send_base: 0,
+            recv_remaining: 0,
+            recv_buffer: Vec::new(),
+            send_buffer: Vec::new(),
         }
     }
 
@@ -80,7 +106,9 @@ impl TCB {
         self.sock.send_to(&bytes[..], &target).unwrap();
     }
 
-    pub fn check_timeout(&mut self) {}
+    pub fn check_timeout(&mut self) -> Option<TCBEvent> {
+        None
+    }
 
     pub fn open(&mut self) {
         self.state = TCBState::LISTEN;
@@ -100,7 +128,7 @@ impl TCB {
         self.state = TCBState::SYN_SENT;
     }
 
-    pub fn handle_segment(&mut self, seg: Segment) {
+    pub fn handle_segment(&mut self, seg: Segment) -> Option<TCBEvent> {
         match self.state {
             TCBState::LISTEN => {
                 if seg.get_flag(Flag::SYN) {
@@ -119,18 +147,22 @@ impl TCB {
                 }
                 if seg.get_flag(Flag::ACK) && seg.seq_num == self.expected_seq {
                     println!("ESTAB!");
+                    // Check file and do server checking
                     self.expected_seq = seg.seq_num + 1;
-                    self.state = TCBState::ESTAB;
+                    self.state = TCBState::ESTAB(RDTState::IDLE);
+                    return Some(TCBEvent::ESTAB);
                 }
             }
-            TCBState::ESTAB => {
+            TCBState::ESTAB(rdt_state) => {
                 if seg.get_flag(Flag::FIN) {
                     self.state = TCBState::CLOSED;
                     let mut ack = self.next_seg();
                     ack.set_flag(Flag::ACK);
                     ack.ack_num = self.expected_seq;
                     self.send_seg(&ack);
-                    println!("CLOSED!");
+                    return Some(TCBEvent::CLOSED);
+                } else {
+                    self.handle_rdt(seg, rdt_state);
                 }
             }
             TCBState::SYN_SENT => {
@@ -139,11 +171,30 @@ impl TCB {
                     ack.set_flag(Flag::ACK);
                     ack.ack_num = self.expected_seq;
                     self.send_seg(&ack);
-                    self.state = TCBState::ESTAB;
+                    self.state = TCBState::ESTAB(RDTState::IDLE);
                 }
             }
             TCBState::CLOSED => {}
         };
+
+        return None;
+    }
+
+    pub fn send(&mut self, data: Vec<u8>) {}
+
+    pub fn handle_rdt(&mut self, seg: Segment, state: RDTState) {
+        match state {
+            RDTState::SENDING if seg.get_flag(Flag::ACK) => {
+                if seg.ack_num > self.send_base {
+                    // Deal with over
+                    self.send_base = seg.ack_num;
+                    //                self.send_remaining -= seg.ack_num - self.send_base;
+                }
+                self.timeout = SystemTime::now();
+            }
+            _ => {}
+        }
+
     }
 }
 
@@ -194,7 +245,7 @@ mod tests {
         ack.seq_num = 1;
         ack.set_flag(Flag::ACK);
         tcb.handle_segment(ack);
-        assert_eq!(tcb.state, TCBState::ESTAB);
+        assert_eq!(tcb.state, TCBState::ESTAB(RDTState::IDLE));
 
         let mut fin = Segment::new(client_addr.port(), server_port);
         fin.seq_num = 2;
@@ -214,7 +265,7 @@ mod tests {
         synack.set_flag(Flag::ACK);
         synack.set_flag(Flag::SYN);
         tcb.handle_segment(synack);
-        assert_eq!(tcb.state, TCBState::ESTAB);
+        assert_eq!(tcb.state, TCBState::ESTAB(RDTState::IDLE));
 
         let answer: Segment = recv();
         assert!(answer.get_flag(Flag::ACK));
