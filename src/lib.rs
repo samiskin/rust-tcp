@@ -7,41 +7,43 @@ use segment::*;
 use conn::*;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::time::Duration;
 use std::sync::mpsc::{Sender, Receiver, channel};
 
-fn run_handshake(tcb: &mut TCB, rx: &Receiver<Segment>) -> Result<(), ()> {
-    'estab: loop {
-        let seg = rx.recv().unwrap();
-        if let Some(evt) = tcb.handle_shake(seg) {
-            match evt {
-                TCBEvent::ESTAB => {
-                    return Ok(());
-                }
-                TCBEvent::CLOSED => {
-                    println!("SERVER CLOSED");
-                    return Err(());
-                }
-            }
-        }
+
+pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Result<(), TCBState> {
+    assert_eq!(tcb.state, TCBState::Listen);
+    if initiate {
+        tcb.send_syn();
     }
 
+
+    loop {
+        let seg = rx.recv().unwrap();
+        tcb.handle_shake(seg);
+        if tcb.state == TCBState::Estab {
+            return Ok(());
+        } else if tcb.state == TCBState::Closed {
+            return Err(tcb.state);
+        }
+    }
 }
 
-fn run_tcb(mut tcb: TCB, rx: Receiver<Segment>) {
-    run_handshake(&mut tcb, &rx).unwrap();
+
+fn run_tcb(tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
+    let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
+    handshake(&mut tcb, &rx, false).unwrap();
 
     let str = format!(
         "{}.{}.{}.{}",
-        tcb.tuple.dst_ip,
-        tcb.tuple.dst_port,
-        Ipv4Addr::new(127, 0, 0, 1),
-        tcb.tuple.src_port
+        tcb.tuple.dst.ip(),
+        tcb.tuple.dst.port(),
+        tcb.tuple.src.ip(),
+        tcb.tuple.src.port()
     );
 
     println!("Server Estab!  looking for file {}", str);
 }
-use std::error::Error;
+
 fn multiplexed_receive(
     channels: &mut HashMap<TCPTuple, Sender<Segment>>,
     socket: &UdpSocket,
@@ -55,8 +57,7 @@ fn multiplexed_receive(
             let buf = Vec::from(&mut buf[..amt]);
             let seg = Segment::from_buf(buf);
             if seg.validate() {
-                println!("{:?} {:?}", seg, src);
-                let tuple = TCPTuple::from(seg.dst_port(), &src);
+                let tuple = TCPTuple::from(socket.local_addr().unwrap(), src);
                 match channels.entry(tuple) {
                     Entry::Occupied(entry) => {
                         entry.into_mut().send(seg).unwrap();
@@ -66,8 +67,8 @@ fn multiplexed_receive(
                         let (tx, rx) = channel();
                         tx.send(seg).unwrap();
                         v.insert(tx);
-                        let tcb = TCB::new(tuple, socket.try_clone().unwrap());
-                        std::thread::spawn(move || { run_tcb(tcb, rx); });
+                        let socket = socket.try_clone().unwrap();
+                        std::thread::spawn(move || { run_tcb(tuple, rx, socket); });
                     }
                 }
 
@@ -95,26 +96,6 @@ pub fn run_server(config: config::Config) -> Result<(), ()> {
 
 pub fn run_client(config: config::Config) -> Result<(), ()> {
     println!("Starting Client...");
-    let client_port = 54321;
-    let socket = UdpSocket::bind(format!("127.0.0.1:{}", client_port)).unwrap();
-    let mut channels: HashMap<TCPTuple, Sender<Segment>> = HashMap::new();
-
-    let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), config.port);
-    let tuple = TCPTuple::from(client_port, &dst);
-
-    let (tx, rx) = channel();
-    channels.insert(tuple, tx);
-
-    let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
-    std::thread::spawn(move || {
-        tcb.send_syn();
-        run_handshake(&mut tcb, &rx).unwrap();
-        println!("CLIENT ESTAB");
-    });
-
-    loop {
-        multiplexed_receive(&mut channels, &socket)?;
-    }
 
     Ok(())
 }
@@ -125,12 +106,12 @@ mod tests {
     use std::thread;
 
     fn tcb_pair() -> (TCB, TCB) {
-        let server_addr = "127.0.0.1:12345".parse().unwrap();
-        let client_addr = "127.0.0.1:54321".parse().unwrap();
-        let server_sock = UdpSocket::bind(server_addr).unwrap();
-        let client_sock = UdpSocket::bind(client_addr).unwrap();
-        let server_tuple = TCPTuple::from_addrs(&server_addr, &client_addr);
-        let client_tuple = TCPTuple::from_addrs(&client_addr, &server_addr);
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let client_addr = client_sock.local_addr().unwrap();
+        let server_tuple = TCPTuple::from(server_addr, client_addr);
+        let client_tuple = TCPTuple::from(client_addr, server_addr);
         (
             TCB::new(server_tuple, server_sock),
             TCB::new(client_tuple, client_sock),
@@ -138,26 +119,26 @@ mod tests {
     }
 
     #[test]
-    fn handshake() {
+    fn estab_handshake() {
+        let (server_tx, server_rx) = channel();
+        let (client_tx, client_rx) = channel();
         let (mut server_tcb, mut client_tcb) = tests::tcb_pair();
         let server_sock = server_tcb.sock.try_clone().unwrap();
         let client_sock = client_tcb.sock.try_clone().unwrap();
         let server_sock_2 = server_tcb.sock.try_clone().unwrap();
         let client_sock_2 = client_tcb.sock.try_clone().unwrap();
-        let (server_tx, server_rx) = channel();
-        let (client_tx, client_rx) = channel();
         let mut server_channels: HashMap<TCPTuple, Sender<Segment>> = HashMap::new();
         server_channels.insert(server_tcb.tuple, server_tx);
         let mut client_channels: HashMap<TCPTuple, Sender<Segment>> = HashMap::new();
         client_channels.insert(client_tcb.tuple, client_tx);
 
+
         let server_tcb_thread = thread::spawn(move || {
-            run_handshake(&mut server_tcb, &server_rx).unwrap();
+            handshake(&mut server_tcb, &server_rx, false).expect("serverhandshake");
             println!("Server ESTAB");
         });
         let client_tcb_thread = thread::spawn(move || {
-            client_tcb.send_syn();
-            run_handshake(&mut client_tcb, &client_rx).unwrap();
+            handshake(&mut client_tcb, &client_rx, true).expect("clienthandshake");
             println!("Client ESTAB");
         });
 
@@ -175,7 +156,7 @@ mod tests {
             }
         });
 
-        server_tcb_thread.join().unwrap();
+        server_tcb_thread.join().expect("couldnt server unwrap");
         println!("Server completed!");
         client_tcb_thread.join().unwrap();
         println!("Client completed!");

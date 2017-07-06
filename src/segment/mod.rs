@@ -1,5 +1,3 @@
-use std::net::*;
-
 #[derive(Debug, Clone)]
 pub struct Segment {
     src_port: u16,
@@ -76,7 +74,6 @@ impl Segment {
     }
 
     pub fn from_buf(buf: Vec<u8>) -> Segment {
-        println!("Buf: {:?}", buf);
         assert!(buf.len() >= 20);
         Segment {
             src_port: buf_to_u16(&buf[0..2]),
