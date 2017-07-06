@@ -1,13 +1,18 @@
+pub mod utils;
 pub mod segment;
 pub mod config;
 use std::str;
 use std::net::*;
 pub mod conn;
+use config::*;
 use segment::*;
 use conn::*;
+use utils::*;
 use std::collections::HashMap;
+use std::io::prelude::*;
 use std::collections::hash_map::Entry;
 use std::sync::mpsc::{Sender, Receiver, channel};
+use std::fs::File;
 
 
 pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Result<(), TCBState> {
@@ -26,25 +31,57 @@ pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Resul
             return Err(tcb.state);
         }
     }
+
+
 }
 
 
-fn run_tcb(tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
-    let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
-    handshake(&mut tcb, &rx, false).unwrap();
-
-    let str = format!(
+fn get_file(tuple: &TCPTuple, folder: String) -> File {
+    let filename = format!(
         "{}.{}.{}.{}",
-        tcb.tuple.dst.ip(),
-        tcb.tuple.dst.port(),
-        tcb.tuple.src.ip(),
-        tcb.tuple.src.port()
+        tuple.dst.ip(),
+        tuple.dst.port(),
+        tuple.src.ip(),
+        tuple.src.port()
     );
 
-    println!("Server Estab!  looking for file {}", str);
+    println!("Server Estab!  looking for file {}", filename);
+
+    let filepath = format!("{}/{}", folder, filename);
+    let file = if let Ok(file) = File::open(filepath.clone()) {
+        file
+    } else {
+        File::create(filepath).unwrap()
+    };
+
+    println!("Got file {:?}", file);
+    file
+}
+
+fn send_str(tcb: &mut TCB, s: String) {
+    let len: u32 = s.len() as u32;
+    let mut bytes = u32_to_u8(len);
+    bytes.extend(s.into_bytes());
+    tcb.send(bytes);
+}
+
+fn recv_str(tcb: &mut TCB) -> String {
+    let size = buf_to_u32(&tcb.recv(4));
+    String::from_utf8(tcb.recv(size)).unwrap()
+}
+
+fn run_tcb(config: Config, tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
+    let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
+    handshake(&mut tcb, &rx, false).unwrap();
+    let mut file = get_file(&tuple, config.filepath);
+    let mut s = String::new();
+    file.read_to_string(&mut s).unwrap();
+
+
 }
 
 fn multiplexed_receive(
+    config: &Config,
     channels: &mut HashMap<TCPTuple, Sender<Segment>>,
     socket: &UdpSocket,
 ) -> Result<(), ()> {
@@ -68,10 +105,10 @@ fn multiplexed_receive(
                         tx.send(seg).unwrap();
                         v.insert(tx);
                         let socket = socket.try_clone().unwrap();
-                        std::thread::spawn(move || { run_tcb(tuple, rx, socket); });
+                        let config = config.clone();
+                        std::thread::spawn(move || { run_tcb(config, tuple, rx, socket); });
                     }
                 }
-
             }
         }
         Err(err) => return Err(()),
@@ -87,7 +124,7 @@ pub fn run_server(config: config::Config) -> Result<(), ()> {
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", config.port)).unwrap();
 
     'event_loop: loop {
-        multiplexed_receive(&mut channels, &socket)?;
+        multiplexed_receive(&config, &mut channels, &socket)?;
     }
 }
 
@@ -105,6 +142,13 @@ mod tests {
     use super::*;
     use std::thread;
 
+    fn config() -> Config {
+        Config {
+            port: 12345,
+            filepath: String::from("./"),
+        }
+    }
+
     fn tcb_pair() -> (TCB, TCB) {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -119,7 +163,20 @@ mod tests {
     }
 
     #[test]
+    fn get_file_test() {
+        let tuple = TCPTuple::from(
+            "127.0.0.1:54321".parse().unwrap(),
+            "127.0.0.1:12345".parse().unwrap(),
+        );
+        let mut file = get_file(&tuple, config().filepath);
+        let mut s = String::new();
+        file.read_to_string(&mut s).unwrap();
+        println!("Got file of length {}", s.len());
+    }
+
+    #[test]
     fn estab_handshake() {
+        let config = config();
         let (server_tx, server_rx) = channel();
         let (client_tx, client_rx) = channel();
         let (mut server_tcb, mut client_tcb) = tests::tcb_pair();
@@ -142,15 +199,16 @@ mod tests {
             println!("Client ESTAB");
         });
 
+        let server_config = config.clone();
         let server = thread::spawn(move || 'event_loop: loop {
-            match multiplexed_receive(&mut server_channels, &server_sock) {
+            match multiplexed_receive(&server_config, &mut server_channels, &server_sock) {
                 Err(_) => break 'event_loop,
                 Ok(_) => {}
             }
         });
 
         let client = thread::spawn(move || 'event_loop: loop {
-            match multiplexed_receive(&mut client_channels, &client_sock) {
+            match multiplexed_receive(&config, &mut client_channels, &client_sock) {
                 Err(_) => break 'event_loop,
                 Ok(_) => {}
             }

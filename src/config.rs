@@ -1,5 +1,6 @@
 use std::env;
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct Config {
     pub port: u16,
     pub filepath: String,

@@ -36,7 +36,7 @@ impl TCPTuple {
     }
 }
 
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::Receiver;
 #[derive(Debug)]
 pub struct TCB {
     pub state: TCBState,
@@ -53,6 +53,15 @@ impl TCB {
             timeout: SystemTime::now(),
             sock: sock,
         }
+    }
+
+    pub fn send(&mut self, payload: Vec<u8>) {
+        // TODO
+    }
+
+    pub fn recv(&mut self, size: u32) -> Vec<u8> {
+        // TODO
+        Vec::new()
     }
 
     pub fn reset(&mut self) {

@@ -1,3 +1,5 @@
+use utils::*;
+
 #[derive(Debug, Clone)]
 pub struct Segment {
     src_port: u16,
@@ -33,14 +35,6 @@ pub enum Flag {
     FIN,
 }
 
-fn buf_to_u16(buf: &[u8]) -> u16 {
-    (buf[0] as u16) << 8 | (buf[1] as u16)
-}
-
-fn buf_to_u32(buf: &[u8]) -> u32 {
-    (buf_to_u16(&buf[0..2]) as u32) << 16 | (buf_to_u16(&buf[2..4]) as u32)
-}
-
 impl Segment {
     pub fn src_port(&self) -> u16 {
         self.src_port
@@ -56,6 +50,10 @@ impl Segment {
 
     pub fn set_seq(&mut self, seq_num: u32) {
         self.seq_num = seq_num;
+    }
+
+    pub fn payload(&self) -> Vec<u8> {
+        Vec::from(&*self.payload)
     }
 
     pub fn new(src_port: u16, dst_port: u16) -> Segment {
@@ -124,15 +122,6 @@ impl Segment {
     }
 
     pub fn to_byte_vec(&self) -> Vec<u8> {
-        let u16_to_u8 = |v: u16| vec![(v >> 8) as u8, (v & 0xff) as u8];
-        let u32_to_u16 = |v: u32| vec![(v >> 16) as u16, (v & 0xffff) as u16];
-        let u32_to_u8 = |v: u32| {
-            u32_to_u16(v)
-                .iter()
-                .flat_map(|x| u16_to_u8(*x))
-                .collect::<Vec<u8>>()
-        };
-
         let mut set = u16_to_u8(self.src_port);
         set.extend(u16_to_u8(self.dst_port).iter());
         set.extend(u32_to_u8(self.seg_size).iter());
