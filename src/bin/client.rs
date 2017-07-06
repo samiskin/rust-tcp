@@ -14,8 +14,8 @@ fn main() {
         process::exit(1);
     });
 
-    if let Err(e) = ece358::run_client(config) {
-        writeln!(&mut stderr, "Application error: {}", e).expect("Could not write to stderr");
+    if let Err(_) = ece358::run_client(config) {
+        // writeln!(&mut stderr, "Application error: {}", e).expect("Could not write to stderr");
         process::exit(1);
     };
 }

@@ -2,14 +2,14 @@ use std::net::*;
 
 #[derive(Debug, Clone)]
 pub struct Segment {
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub seg_size: u32,
-    pub seq_num: u32,
-    pub ack_num: u32,
-    pub flags: u16,
-    pub checksum: u16,
-    pub payload: Box<[u8]>,
+    src_port: u16,
+    dst_port: u16,
+    seg_size: u32,
+    seq_num: u32,
+    ack_num: u32,
+    flags: u16,
+    checksum: u16,
+    payload: Box<[u8]>,
 }
 
 use std::fmt::{Binary, Formatter, Error};
@@ -50,6 +50,14 @@ impl Segment {
 
     pub fn dst_port(&self) -> u16 {
         self.dst_port
+    }
+
+    pub fn seq_num(&self) -> u32 {
+        self.seq_num
+    }
+
+    pub fn set_seq(&mut self, seq_num: u32) {
+        self.seq_num = seq_num;
     }
 
     pub fn new(src_port: u16, dst_port: u16) -> Segment {
