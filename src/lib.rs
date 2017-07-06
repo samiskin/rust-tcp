@@ -36,7 +36,7 @@ pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Resul
 }
 
 
-fn get_file(tuple: &TCPTuple, folder: String) -> File {
+fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
     let filename = format!(
         "{}.{}.{}.{}",
         tuple.dst.ip(),
@@ -45,13 +45,12 @@ fn get_file(tuple: &TCPTuple, folder: String) -> File {
         tuple.src.port()
     );
 
-    println!("Server Estab!  looking for file {}", filename);
-
     let filepath = format!("{}/{}", folder, filename);
     let file = if let Ok(file) = File::open(filepath.clone()) {
-        file
+        Ok(file)
     } else {
-        File::create(filepath).unwrap()
+        File::create(filepath.clone()).unwrap();
+        File::open(filepath.clone())
     };
 
     println!("Got file {:?}", file);
@@ -73,11 +72,9 @@ fn recv_str(tcb: &mut TCB) -> String {
 fn run_tcb(config: Config, tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
     let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
     handshake(&mut tcb, &rx, false).unwrap();
-    let mut file = get_file(&tuple, config.filepath);
+    let mut file = get_file(&tuple, config.filepath).unwrap();
     let mut s = String::new();
     file.read_to_string(&mut s).unwrap();
-
-
 }
 
 fn multiplexed_receive(
@@ -168,7 +165,7 @@ mod tests {
             "127.0.0.1:54321".parse().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
         );
-        let mut file = get_file(&tuple, config().filepath);
+        let mut file = get_file(&tuple, config().filepath).unwrap();
         let mut s = String::new();
         file.read_to_string(&mut s).unwrap();
         println!("Got file of length {}", s.len());

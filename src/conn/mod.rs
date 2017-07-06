@@ -43,6 +43,13 @@ pub struct TCB {
     pub tuple: TCPTuple,
     pub timeout: SystemTime,
     pub sock: UdpSocket,
+
+    // Sender state
+    base: u32,
+    next_seq: u32,
+
+    // Receiver state
+    expected_seq: u32,
 }
 
 impl TCB {
@@ -52,8 +59,13 @@ impl TCB {
             tuple: tuple,
             timeout: SystemTime::now(),
             sock: sock,
+            base: 1,
+            next_seq: 1,
+            expected_seq: 1,
         }
     }
+
+    fn gobackn(&mut self) {}
 
     pub fn send(&mut self, payload: Vec<u8>) {
         // TODO
@@ -69,7 +81,16 @@ impl TCB {
     }
 
     fn next_seg(&mut self) -> Segment {
-        let seg = Segment::new(self.tuple.src.port(), self.tuple.dst.port());
+        let mut seg = Segment::new(self.tuple.src.port(), self.tuple.dst.port());
+        seg.set_seq(self.next_seq);
+        self.next_seq += 1;
+        seg
+    }
+
+    fn next_ack(&mut self) -> Segment {
+        let mut seg = Segment::new(self.tuple.src.port(), self.tuple.dst.port());
+        seg.set_ack_num(self.expected_seq);
+        self.expected_seq += 1;
         seg
     }
 
@@ -101,13 +122,28 @@ impl TCB {
     }
 
     pub fn handle_shake(&mut self, seg: Segment) {
+        if self.state != TCBState::Listen && !seg.get_flag(Flag::ACK) &&
+            seg.seq_num() < self.expected_seq
+        {
+            println!(
+                "{} Received segment thats already been handled",
+                self.tuple.src
+            );
+            return;
+        }
         match self.state {
             TCBState::Listen => {
                 if seg.get_flag(Flag::SYN) {
+                    // For receives
+                    self.expected_seq = seg.seq_num();
+
                     self.state = TCBState::SynRecd;
-                    let mut synack = self.next_seg();
+                    let mut synack = self.next_ack();
                     synack.set_flag(Flag::SYN);
                     synack.set_flag(Flag::ACK);
+                    synack.set_seq(self.next_seq); // Synack includes seq
+                    self.next_seq += 1;
+
                     self.send_seg(&synack);
                 }
             }
@@ -119,14 +155,14 @@ impl TCB {
             TCBState::Estab => {
                 if seg.get_flag(Flag::FIN) {
                     self.state = TCBState::Closed;
-                    let mut ack = self.next_seg();
+                    let mut ack = self.next_ack();
                     ack.set_flag(Flag::ACK);
                     self.send_seg(&ack);
                 }
             }
             TCBState::SynSent => {
                 if seg.get_flag(Flag::ACK) && seg.get_flag(Flag::SYN) {
-                    let mut ack = self.next_seg();
+                    let mut ack = self.next_ack();
                     ack.set_flag(Flag::ACK);
                     self.send_seg(&ack);
                     self.state = TCBState::Estab;
@@ -199,7 +235,7 @@ mod tests {
         assert!(answer.get_flag(Flag::SYN));
 
         let mut synack = Segment::new(client_addr.port(), server_addr.port());
-        synack.set_seq(1);
+        synack.set_seq(tcb.expected_seq);
         synack.set_flag(Flag::ACK);
         synack.set_flag(Flag::SYN);
         tcb.handle_shake(synack);
