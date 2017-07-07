@@ -50,18 +50,17 @@ fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
         File::open(filepath.clone())
     };
 
-    println!("Got file {:?}", file);
     file
 }
 
-fn send_str(tcb: &mut TCB, rx: &Receiver<Segment>, s: String) {
+fn _send_str(tcb: &mut TCB, rx: &Receiver<Segment>, s: String) {
     let len: u32 = s.len() as u32;
     let mut bytes = u32_to_u8(len);
     bytes.extend(s.into_bytes());
     tcb.send(bytes, &rx);
 }
 
-fn recv_str(tcb: &mut TCB, rx: &Receiver<Segment>) -> String {
+fn _recv_str(tcb: &mut TCB, rx: &Receiver<Segment>) -> String {
     let size = buf_to_u32(&tcb.recv(4, &rx));
     String::from_utf8(tcb.recv(size, &rx)).unwrap()
 }
@@ -105,7 +104,7 @@ fn multiplexed_receive(
                 }
             }
         }
-        Err(err) => return Err(()),
+        Err(_) => return Err(()),
     };
 
     return Ok(());
@@ -125,7 +124,7 @@ pub fn run_server(config: config::Config) -> Result<(), ()> {
 
 
 
-pub fn run_client(config: config::Config) -> Result<(), ()> {
+pub fn run_client(_config: config::Config) -> Result<(), ()> {
     println!("Starting Client...");
 
     Ok(())
@@ -233,19 +232,24 @@ mod tests {
         );
     }
 
+    const SCRIPT: &'static str = "Did you ever hear the tragedy of Darth Plagueis The Wise? I thought not. It’s not a story the Jedi would tell you. It’s a Sith legend. Darth Plagueis was a Dark Lord of the Sith, so powerful and so wise he could use the Force to influence the midichlorians to create life… He had such a knowledge of the dark side that he could even keep the ones he cared about from dying. The dark side of the Force is a pathway to many abilities some consider to be unnatural. He became so powerful… the only thing he was afraid of was losing his power, which eventually, of course, he did. Unfortunately, he taught his apprentice everything he knew, then his apprentice killed him in his sleep. Ironic. He could save others from death, but not himself.";
+
     #[test]
     fn transfer_data() {
         tests::run_clientserver_test(
             |mut server_tcb: TCB, server_rx: Receiver<Segment>| {
                 handshake(&mut server_tcb, &server_rx, false).expect("serverhandshake");
-                let str = String::from("Hello World");
-                send_str(&mut server_tcb, &server_rx, str);
+                let str = String::from(SCRIPT);
+                _send_str(&mut server_tcb, &server_rx, str);
             },
             |mut client_tcb: TCB, client_rx: Receiver<Segment>| {
                 handshake(&mut client_tcb, &client_rx, true).expect("clienthandshake");
-                let str = recv_str(&mut client_tcb, &client_rx);
-                assert_eq!(str, String::from("Hello World"));
+                let str = _recv_str(&mut client_tcb, &client_rx);
+                assert_eq!(str, SCRIPT);
             },
         );
     }
+
+    #[test]
+    fn temp() {}
 }
