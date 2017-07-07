@@ -21,7 +21,6 @@ pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Resul
         tcb.send_syn();
     }
 
-
     loop {
         let seg = rx.recv().unwrap();
         tcb.handle_shake(seg);
@@ -31,8 +30,6 @@ pub fn handshake(tcb: &mut TCB, rx: &Receiver<Segment>, initiate: bool) -> Resul
             return Err(tcb.state);
         }
     }
-
-
 }
 
 
@@ -57,16 +54,16 @@ fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
     file
 }
 
-fn send_str(tcb: &mut TCB, s: String) {
+fn send_str(tcb: &mut TCB, rx: &Receiver<Segment>, s: String) {
     let len: u32 = s.len() as u32;
     let mut bytes = u32_to_u8(len);
     bytes.extend(s.into_bytes());
-    tcb.send(bytes);
+    tcb.send(bytes, &rx);
 }
 
-fn recv_str(tcb: &mut TCB) -> String {
-    let size = buf_to_u32(&tcb.recv(4));
-    String::from_utf8(tcb.recv(size)).unwrap()
+fn recv_str(tcb: &mut TCB, rx: &Receiver<Segment>) -> String {
+    let size = buf_to_u32(&tcb.recv(4, &rx));
+    String::from_utf8(tcb.recv(size, &rx)).unwrap()
 }
 
 fn run_tcb(config: Config, tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
@@ -171,12 +168,15 @@ mod tests {
         println!("Got file of length {}", s.len());
     }
 
-    #[test]
-    fn estab_handshake() {
+    fn run_clientserver_test<F1, F2>(server_fn: F1, client_fn: F2)
+    where
+        F1: FnOnce(TCB, Receiver<Segment>) -> () + Send + 'static,
+        F2: FnOnce(TCB, Receiver<Segment>) -> () + Send + 'static,
+    {
         let config = config();
         let (server_tx, server_rx) = channel();
         let (client_tx, client_rx) = channel();
-        let (mut server_tcb, mut client_tcb) = tests::tcb_pair();
+        let (server_tcb, client_tcb) = tests::tcb_pair();
         let server_sock = server_tcb.sock.try_clone().unwrap();
         let client_sock = client_tcb.sock.try_clone().unwrap();
         let server_sock_2 = server_tcb.sock.try_clone().unwrap();
@@ -187,14 +187,8 @@ mod tests {
         client_channels.insert(client_tcb.tuple, client_tx);
 
 
-        let server_tcb_thread = thread::spawn(move || {
-            handshake(&mut server_tcb, &server_rx, false).expect("serverhandshake");
-            println!("Server ESTAB");
-        });
-        let client_tcb_thread = thread::spawn(move || {
-            handshake(&mut client_tcb, &client_rx, true).expect("clienthandshake");
-            println!("Client ESTAB");
-        });
+        let server_tcb_thread = thread::spawn(move || { server_fn(server_tcb, server_rx); });
+        let client_tcb_thread = thread::spawn(move || { client_fn(client_tcb, client_rx); });
 
         let server_config = config.clone();
         let server = thread::spawn(move || 'event_loop: loop {
@@ -212,9 +206,7 @@ mod tests {
         });
 
         server_tcb_thread.join().expect("couldnt server unwrap");
-        println!("Server completed!");
-        client_tcb_thread.join().unwrap();
-        println!("Client completed!");
+        client_tcb_thread.join().expect("couldnt client unwrap");
         let bytes = vec![0];
         server_sock_2
             .send_to(&bytes[..], &client_sock_2.local_addr().unwrap())
@@ -225,5 +217,35 @@ mod tests {
 
         server.join().unwrap();
         client.join().unwrap();
+    }
+
+    #[test]
+    fn estab_handshake() {
+        tests::run_clientserver_test(
+            |mut server_tcb: TCB, server_rx: Receiver<Segment>| {
+                handshake(&mut server_tcb, &server_rx, false).expect("serverhandshake");
+                assert_eq!(server_tcb.state, TCBState::Estab);
+            },
+            |mut client_tcb: TCB, client_rx: Receiver<Segment>| {
+                handshake(&mut client_tcb, &client_rx, true).expect("clienthandshake");
+                assert_eq!(client_tcb.state, TCBState::Estab);
+            },
+        );
+    }
+
+    #[test]
+    fn transfer_data() {
+        tests::run_clientserver_test(
+            |mut server_tcb: TCB, server_rx: Receiver<Segment>| {
+                handshake(&mut server_tcb, &server_rx, false).expect("serverhandshake");
+                let str = String::from("Hello World");
+                send_str(&mut server_tcb, &server_rx, str);
+            },
+            |mut client_tcb: TCB, client_rx: Receiver<Segment>| {
+                handshake(&mut client_tcb, &client_rx, true).expect("clienthandshake");
+                let str = recv_str(&mut client_tcb, &client_rx);
+                assert_eq!(str, String::from("Hello World"));
+            },
+        );
     }
 }

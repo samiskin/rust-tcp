@@ -30,8 +30,8 @@ impl Binary for Segment {
 
 
 pub enum Flag {
-    SYN,
     ACK,
+    SYN,
     FIN,
 }
 
@@ -46,6 +46,10 @@ impl Segment {
 
     pub fn seq_num(&self) -> u32 {
         self.seq_num
+    }
+
+    pub fn ack_num(&self) -> u32 {
+        self.ack_num
     }
 
     pub fn set_seq(&mut self, seq_num: u32) {

@@ -1,6 +1,7 @@
 use std::net::*;
 use segment::*;
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
+use std::cmp::min;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TCBEvent {
@@ -36,7 +37,7 @@ impl TCPTuple {
     }
 }
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::*;
 #[derive(Debug)]
 pub struct TCB {
     pub state: TCBState,
@@ -45,12 +46,17 @@ pub struct TCB {
     pub sock: UdpSocket,
 
     // Sender state
-    base: u32,
+    seq_base: u32,
     next_seq: u32,
+    send_buffer: Box<[u8]>,
+    bytes_sent: u32,
 
     // Receiver state
     expected_seq: u32,
+    recv_buffer: Vec<u8>,
 }
+
+const WINDOW_SIZE: u32 = 1;
 
 impl TCB {
     pub fn new(tuple: TCPTuple, sock: UdpSocket) -> TCB {
@@ -59,38 +65,104 @@ impl TCB {
             tuple: tuple,
             timeout: SystemTime::now(),
             sock: sock,
-            base: 1,
+
+            seq_base: 1,
             next_seq: 1,
+            send_buffer: Box::new([]),
+            bytes_sent: 0,
+
             expected_seq: 1,
+            recv_buffer: Vec::new(),
         }
     }
 
-    fn gobackn(&mut self) {}
+    fn gobackn_sender(&mut self, rx: &Receiver<Segment>) {
+        let total_bytes = self.send_buffer.len();
+        let mut bytes_sent = 0;
+        while bytes_sent < total_bytes {
+            let mut seg = self.new_seg();
+            let size = min(total_bytes - bytes_sent, 10);
+            let data = Vec::from(&self.send_buffer[bytes_sent..bytes_sent + size]);
+            seg.set_data(data);
+            self.next_seq = self.seq_base + size as u32;
+            self.send_seg(&seg);
+            'await_ack: loop {
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(seg) => {
+                        if seg.get_flag(Flag::ACK) && seg.ack_num() == self.next_seq {
+                            self.seq_base = self.next_seq;
+                            break 'await_ack;
+                        } else {
+                            println!("Got ack num {}, expected {}", seg.ack_num(), self.next_seq);
+                        }
+                    }
+                    Err(e) if e == RecvTimeoutError::Timeout => {
+                        self.send_seg(&seg);
+                    }
+                    Err(_) => panic!(),
+                }
+            }
 
-    pub fn send(&mut self, payload: Vec<u8>) {
-        // TODO
+            bytes_sent += size;
+        }
     }
 
-    pub fn recv(&mut self, size: u32) -> Vec<u8> {
+    fn gobackn_receiver(&mut self, bytes_requested: u32, rx: &Receiver<Segment>) -> Vec<u8> {
+        while self.recv_buffer.len() < bytes_requested as usize {
+            let seg = rx.recv().unwrap();
+            if seg.seq_num() == self.expected_seq {
+                let payload_size = seg.payload().len() as usize;
+                self.recv_buffer.extend(seg.payload());
+                self.expected_seq += payload_size as u32;
+                let mut ack = self.new_seg();
+                ack.set_flag(Flag::ACK);
+                ack.set_ack_num(self.expected_seq);
+                self.send_seg(&ack);
+            } else {
+                println!(
+                    "GBN Received out of order seq num: {}, expected {}",
+                    seg.seq_num(),
+                    self.expected_seq
+                );
+            }
+        }
+
+        let payload = Vec::from(&self.recv_buffer[0..bytes_requested as usize]);
+        self.recv_buffer = Vec::from(&self.recv_buffer[bytes_requested as usize..]);
+        payload
+    }
+
+    pub fn send(&mut self, payload: Vec<u8>, rx: &Receiver<Segment>) {
         // TODO
-        Vec::new()
+        self.bytes_sent = 0;
+        self.send_buffer = payload.into_boxed_slice();
+        self.gobackn_sender(rx);
+    }
+
+    pub fn recv(&mut self, size: u32, rx: &Receiver<Segment>) -> Vec<u8> {
+        // TODO
+        self.gobackn_receiver(size, rx)
     }
 
     pub fn reset(&mut self) {
         self.state = TCBState::Listen;
     }
 
-    fn next_seg(&mut self) -> Segment {
+    fn new_seg(&self) -> Segment {
         let mut seg = Segment::new(self.tuple.src.port(), self.tuple.dst.port());
-        seg.set_seq(self.next_seq);
-        self.next_seq += 1;
+        seg.set_seq(self.seq_base);
+        seg
+    }
+
+    fn next_seg(&mut self) -> Segment {
+        let seg = self.new_seg();
+        self.seq_base += 1;
         seg
     }
 
     fn next_ack(&mut self) -> Segment {
         let mut seg = Segment::new(self.tuple.src.port(), self.tuple.dst.port());
         seg.set_ack_num(self.expected_seq);
-        self.expected_seq += 1;
         seg
     }
 
@@ -110,6 +182,8 @@ impl TCB {
     }
 
     pub fn send_syn(&mut self) {
+        self.seq_base = 1337;
+        // println!("{} sending SYN", self.tuple.src);
         let mut syn = self.next_seg();
         syn.set_flag(Flag::SYN);
         self.send_seg(&syn);
@@ -135,20 +209,20 @@ impl TCB {
             TCBState::Listen => {
                 if seg.get_flag(Flag::SYN) {
                     // For receives
-                    self.expected_seq = seg.seq_num();
+                    self.expected_seq = seg.seq_num() + 1;
 
                     self.state = TCBState::SynRecd;
                     let mut synack = self.next_ack();
                     synack.set_flag(Flag::SYN);
                     synack.set_flag(Flag::ACK);
-                    synack.set_seq(self.next_seq); // Synack includes seq
-                    self.next_seq += 1;
+                    synack.set_seq(self.seq_base);
 
                     self.send_seg(&synack);
                 }
             }
             TCBState::SynRecd => {
                 if seg.get_flag(Flag::ACK) {
+                    self.seq_base += 1;
                     self.state = TCBState::Estab;
                 }
             }
@@ -162,6 +236,7 @@ impl TCB {
             }
             TCBState::SynSent => {
                 if seg.get_flag(Flag::ACK) && seg.get_flag(Flag::SYN) {
+                    self.expected_seq = seg.seq_num() + 1;
                     let mut ack = self.next_ack();
                     ack.set_flag(Flag::ACK);
                     self.send_seg(&ack);
