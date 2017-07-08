@@ -75,18 +75,6 @@ impl TCB {
         )
     }
 
-    fn fill_window(&mut self) -> Vec<u8> {
-        let buffer = &mut self.send_buffer;
-        let window = &mut self.send_window;
-        let fill_amt = min(buffer.len(), WINDOW_SIZE - window.len());
-        let mut data_to_send = Vec::with_capacity(fill_amt);
-        window.extend(buffer.iter().take(fill_amt));
-        for i in 0..fill_amt {
-            data_to_send.push(buffer.pop_front().unwrap());
-        }
-        data_to_send
-    }
-
     fn run_tcp(&mut self, send_syn: bool) {
         if send_syn {
             self.send_syn();
@@ -109,7 +97,10 @@ impl TCB {
             Ok(input) => {
                 match input {
                     TCBInput::Receive(seg) => self.handle_seg(seg),
-                    TCBInput::Send(data) => self.handle_data(data),
+                    TCBInput::Send(data) => {
+                        self.send_buffer.extend(data);
+                        self.fill_send_window();
+                    }
                 }
             }
             Err(e) if e == RecvTimeoutError::Timeout => {
@@ -119,16 +110,40 @@ impl TCB {
         }
     }
 
-    fn handle_data(&mut self, data: Vec<u8>) {}
+    fn fill_send_window(&mut self) {
+        let orig_window_len = self.send_window.len();
+        let send_amt = min(self.send_buffer.len(), WINDOW_SIZE - orig_window_len);
+        self.send_window.extend(
+            self.send_buffer.iter().take(send_amt),
+        );
+        let data_to_send = self.send_buffer.drain(..send_amt).collect::<Vec<u8>>();
+        let next_seq = self.seq_base + orig_window_len as u32;
+        self.send_data(data_to_send, next_seq);
+    }
+
+    fn send_data(&mut self, mut data: Vec<u8>, next_seq: u32) {
+        let mut sent = 0;
+        let bytes_to_send = data.len();
+        while sent < bytes_to_send {
+            let size = min(MAX_PAYLOAD_SIZE, data.len());
+            let payload: Vec<u8> = data.drain(..size).collect();
+            let mut seg = self.make_seg();
+            seg.set_seq(next_seq.wrapping_add(sent as u32));
+            seg.set_data(payload);
+            self.send_seg(seg);
+            sent += size;
+        }
+    }
+
     fn handle_seg(&mut self, seg: Segment) {
-        // handle FIN
         if seg.get_flag(Flag::FIN) {
+            // TODO: Handle close properly
             self.state = TCBState::Closed;
             return;
         }
-        self.handle_acks(&seg);
+        self.handle_acks(&seg); // sender
         self.handle_shake(&seg);
-        self.handle_payload(&seg);
+        self.handle_payload(&seg); // receiver
     }
 
     fn handle_payload(&self, seg: &Segment) {}
@@ -136,13 +151,18 @@ impl TCB {
         let ack_lb = self.seq_base.wrapping_add(1);
         let ack_ub = ack_lb.wrapping_add(WINDOW_SIZE as u32);
         if seg.get_flag(Flag::ACK) && in_wrapped_range((ack_lb, ack_ub), seg.ack_num()) {
-            self.seq_base = seg.ack_num();
             self.unacked_segs.retain(|unacked_seg: &Segment| {
                 unacked_seg.seq_num() >= seg.ack_num()
             });
 
             // Handle payload data, only valid after Estab
-            if self.state == TCBState::Estab {}
+            if self.state == TCBState::Estab {
+                let num_acked_bytes = seg.ack_num().wrapping_sub(self.seq_base) as usize;
+                self.send_window.drain(..num_acked_bytes);
+                self.fill_send_window();
+            }
+
+            self.seq_base = seg.ack_num();
         }
     }
 
@@ -241,41 +261,103 @@ mod tests {
         Segment::from_buf(buf)
     }
 
-    #[test]
-    fn full_handshake() {
-        let (server_tuple, client_tuple, server_sock, client_sock) = tcb_pair();
-        let (mut server_tcb, server_input, _) = server_tuple;
-        let (mut client_tcb, client_input, _) = client_tuple;
+    fn perform_handshake(
+        server_tuple: &mut TcbTup,
+        client_tuple: &mut TcbTup,
+        server_sock: &UdpSocket,
+        client_sock: &UdpSocket,
+    ) {
+        let (ref mut server_tcb, ref server_input, _) = *server_tuple;
+        let (ref mut client_tcb, ref client_input, _) = *client_tuple;
 
-        let server_thread = thread::spawn(move || {
-            server_tcb.handle_input_recv();
-            assert_eq!(server_tcb.state, TCBState::SynRecd);
-            server_tcb.handle_input_recv();
-            assert_eq!(server_tcb.state, TCBState::Estab);
-        });
-
-        let client_thread = thread::spawn(move || {
-            client_tcb.send_syn();
-            assert_eq!(client_tcb.state, TCBState::SynSent);
-            client_tcb.handle_input_recv();
-            assert_eq!(client_tcb.state, TCBState::Estab);
-        });
+        client_tcb.send_syn();
+        assert_eq!(client_tcb.state, TCBState::SynSent);
 
         let client_syn: Segment = sock_recv(&server_sock);
         assert!(client_syn.get_flag(Flag::SYN));
         server_input.send(TCBInput::Receive(client_syn)).unwrap();
+        server_tcb.handle_input_recv();
+        assert_eq!(server_tcb.state, TCBState::SynRecd);
 
         let server_synack: Segment = sock_recv(&client_sock);
         assert!(server_synack.get_flag(Flag::SYN));
         assert!(server_synack.get_flag(Flag::ACK));
         client_input.send(TCBInput::Receive(server_synack)).unwrap();
+        client_tcb.handle_input_recv();
+        assert_eq!(client_tcb.state, TCBState::Estab);
 
         let client_ack: Segment = sock_recv(&server_sock);
         assert!(client_ack.get_flag(Flag::ACK));
         server_input.send(TCBInput::Receive(client_ack)).unwrap();
+        server_tcb.handle_input_recv();
+        assert_eq!(server_tcb.state, TCBState::Estab);
+    }
 
-        server_thread.join().unwrap();
+    #[test]
+    fn full_handshake() {
+        let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+        perform_handshake(
+            &mut server_tuple,
+            &mut client_tuple,
+            &server_sock,
+            &client_sock,
+        );
+    }
+
+    #[test]
+    fn handshake_retransmit() {
+        let (server_tuple, client_tuple, server_sock, client_sock) = tcb_pair();
+        let (mut client_tcb, client_input, _) = client_tuple;
+        let (mut server_tcb, server_input, _) = server_tuple;
+        let client_thread = thread::spawn(move || {
+            client_tcb.send_syn();
+            while client_tcb.state != TCBState::Estab {
+                client_tcb.handle_input_recv();
+            }
+        });
+        sock_recv(&server_sock);
+        let client_syn: Segment = sock_recv(&server_sock); // Wait for second send
+        assert!(client_syn.get_flag(Flag::SYN));
+        server_input.send(TCBInput::Receive(client_syn)).unwrap();
+        server_tcb.handle_input_recv();
+        let server_synack: Segment = sock_recv(&client_sock);
+        client_input.send(TCBInput::Receive(server_synack)).unwrap();
+
         client_thread.join().unwrap();
+    }
+
+    #[test]
+    fn send_test() {
+        let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+        perform_handshake(
+            &mut server_tuple,
+            &mut client_tuple,
+            &server_sock,
+            &client_sock,
+        );
+
+        let (client_tcb, _client_input, _) = client_tuple;
+        let (mut server_tcb, server_input, _) = server_tuple;
+
+        let data_len = WINDOW_SIZE;
+        let str = String::from("Ok");
+        assert!(str.len() <= MAX_PAYLOAD_SIZE);
+        let mut data = vec![5; data_len];
+        data.extend(str.clone().into_bytes());
+        server_input.send(TCBInput::Send(data)).unwrap();
+        server_tcb.handle_input_recv();
+
+        let mut segments = vec![];
+        for _ in 0..((data_len as f64 / MAX_PAYLOAD_SIZE as f64).ceil() as u32) {
+            segments.push(sock_recv(&client_sock));
+        }
+        let mut ack = client_tcb.make_seg();
+        ack.set_flag(Flag::ACK);
+        ack.set_ack_num(segments[1].seq_num());
+        server_input.send(TCBInput::Receive(ack)).unwrap();
+        server_tcb.handle_input_recv();
+        let next_seg = sock_recv(&client_sock);
+        assert_eq!(next_seg.payload(), str.into_bytes());
     }
 }
 
