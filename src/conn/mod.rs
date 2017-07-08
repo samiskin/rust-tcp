@@ -2,7 +2,6 @@ use std::net::*;
 use segment::*;
 use std::time::{SystemTime, Duration};
 use std::cmp::min;
-use utils::*;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TCBEvent {
@@ -88,7 +87,7 @@ impl TCB {
         }
     }
 
-    fn sr_sender(&mut self, payload: Vec<u8>, rx: &Receiver<Segment>) {
+    fn sr_sender(&mut self, payload: Vec<u8>, rx: &Receiver<Segment>) -> Result<(), ()> {
         let total_bytes = payload.len();
         let mut bytes_acked = 0;
         let mut bytes_sent = 0;
@@ -125,6 +124,9 @@ impl TCB {
             'await_ack: loop {
                 match rx.recv_timeout(Duration::from_secs(1)) {
                     Ok(seg) => {
+                        if seg.get_flag(Flag::FIN) {
+                            return Err(());
+                        }
                         let inrange = wrapping_range_check(
                             (
                                 self.seq_base.wrapping_add(1),
@@ -164,12 +166,19 @@ impl TCB {
                     Err(_) => panic!(),
                 }
             }
+
         }
+        Ok(())
+
     }
 
-    fn sr_receiver(&mut self, bytes_requested: u32, rx: &Receiver<Segment>) -> Vec<u8> {
+    fn sr_receiver(&mut self, bytes_requested: u32, rx: &Receiver<Segment>) -> Result<Vec<u8>, ()> {
         while self.recv_buffer.len() < bytes_requested as usize {
             let seg = rx.recv().unwrap();
+            if seg.get_flag(Flag::FIN) {
+                return Err(());
+            }
+
             //            println!("Received seg: {:?}", seg);
 
             let max_ack = self.ack_base.wrapping_add(WINDOW_SIZE as u32);
@@ -213,14 +222,14 @@ impl TCB {
 
         let payload = Vec::from(&self.recv_buffer[0..bytes_requested as usize]);
         self.recv_buffer = Vec::from(&self.recv_buffer[bytes_requested as usize..]);
-        payload
+        Ok(payload)
     }
 
-    pub fn send(&mut self, payload: Vec<u8>, rx: &Receiver<Segment>) {
-        self.sr_sender(payload, rx);
+    pub fn send(&mut self, payload: Vec<u8>, rx: &Receiver<Segment>) -> Result<(), ()> {
+        self.sr_sender(payload, rx)
     }
 
-    pub fn recv(&mut self, size: u32, rx: &Receiver<Segment>) -> Vec<u8> {
+    pub fn recv(&mut self, size: u32, rx: &Receiver<Segment>) -> Result<Vec<u8>, ()> {
         self.sr_receiver(size, rx)
     }
 
@@ -530,13 +539,13 @@ mod tests {
 
         tx.send(send2).unwrap();
         tx.send(send1).unwrap();
-        let data = tcb.sr_receiver(str1.len() as u32, &rx);
+        let data = tcb.sr_receiver(str1.len() as u32, &rx).unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), str1);
         let ack: Segment = sock_recv(&recv_socket);
         assert!(ack.get_flag(Flag::ACK));
         assert_eq!(ack.ack_num(), seq_base + (str1.len() + str2.len()) as u32);
 
-        let data = tcb.sr_receiver(str2.len() as u32, &rx);
+        let data = tcb.sr_receiver(str2.len() as u32, &rx).unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), str2);
     }
 
@@ -544,7 +553,6 @@ mod tests {
     fn sr_receiver_long() {
         let mut tcb = tests::default_tcb();
         tcb.ack_base = 12;
-        let recv_socket = UdpSocket::bind(tcb.tuple.dst).unwrap();
         let (tx, rx) = channel();
 
         let seq_base = 12;
@@ -566,7 +574,7 @@ mod tests {
             tx.send(seg).unwrap();
         }
 
-        let data = tcb.sr_receiver(str1.len() as u32, &rx);
+        let data = tcb.sr_receiver(str1.len() as u32, &rx).unwrap();
         assert_eq!(String::from_utf8(data).unwrap(), str1);
     }
 }

@@ -1,3 +1,4 @@
+pub mod tcp;
 pub mod utils;
 pub mod segment;
 pub mod config;
@@ -43,32 +44,37 @@ fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
     );
 
     let filepath = format!("{}/{}", folder, filename);
-    let file = if let Ok(file) = File::open(filepath.clone()) {
+    let file_result = if let Ok(file) = File::open(filepath.clone()) {
         Ok(file)
     } else {
         File::create(filepath.clone()).unwrap();
         File::open(filepath.clone())
     };
 
-    file
+    file_result
 }
 
 fn _send_str(tcb: &mut TCB, rx: &Receiver<Segment>, s: String) {
     let len: u32 = s.len() as u32;
     let mut bytes = u32_to_u8(len);
     bytes.extend(s.into_bytes());
-    tcb.send(bytes, &rx);
+    tcb.send(bytes, &rx).unwrap();
 }
 
 fn _recv_str(tcb: &mut TCB, rx: &Receiver<Segment>) -> String {
-    let size = buf_to_u32(&tcb.recv(4, &rx));
-    String::from_utf8(tcb.recv(size, &rx)).unwrap()
+    let size = buf_to_u32(&tcb.recv(4, &rx).unwrap());
+    String::from_utf8(tcb.recv(size, &rx).unwrap()).unwrap()
 }
 
 fn run_tcb(config: Config, tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
     let mut tcb = TCB::new(tuple, socket.try_clone().unwrap());
     handshake(&mut tcb, &rx, false).unwrap();
-    let mut file = get_file(&tuple, config.filepath).unwrap();
+    let mut file = if let Ok(file) = get_file(&tuple, config.filepath) {
+        file
+    } else {
+        tcb.close();
+        return;
+    };
     let mut s = String::new();
     file.read_to_string(&mut s).unwrap();
 }
