@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::*;
 use std::collections::VecDeque;
 use std::cmp::*;
+use std::time::Duration;
+use utils::*;
 
 const WINDOW_SIZE: usize = 5;
 const MAX_PAYLOAD_SIZE: usize = 2;
+const TIMEOUT: u64 = 1; // In seconds
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TCBState {
@@ -23,14 +26,19 @@ pub struct TCPTuple {
     pub dst: SocketAddr,
 }
 
+
+pub enum TCBInput {
+    Receive(Segment),
+    Send(Vec<u8>),
+}
+
 #[derive(Debug)]
 pub struct TCB {
     pub tuple: TCPTuple,
     pub state: TCBState,
     pub socket: UdpSocket,
-    pub seg_input: Receiver<Segment>,
-    pub send_input: Receiver<Vec<u8>>,
-    pub recv_output: Sender<u8>,
+    pub data_input: Receiver<TCBInput>,
+    pub byte_output: Sender<u8>,
 
     pub send_buffer: VecDeque<u8>, // Data to be sent that hasn't been
     pub send_window: VecDeque<u8>,
@@ -41,27 +49,17 @@ pub struct TCB {
     pub unacked_segs: VecDeque<Segment>,
 }
 
-pub enum TCBInput {
-    Receive(Segment),
-    Send(Vec<u8>),
-}
-
 impl TCB {
-    pub fn new(
-        tuple: TCPTuple,
-        udp_sock: UdpSocket,
-    ) -> (TCB, Sender<Segment>, Sender<Vec<u8>>, Receiver<u8>) {
-        let (seg_input_tx, seg_input_rx) = channel();
-        let (send_input_tx, send_input_rx) = channel();
-        let (recv_output_tx, recv_output_rx) = channel();
+    pub fn new(tuple: TCPTuple, udp_sock: UdpSocket) -> (TCB, Sender<TCBInput>, Receiver<u8>) {
+        let (data_input_tx, data_input_rx) = channel();
+        let (byte_output_tx, byte_output_rx) = channel();
         (
             TCB {
                 tuple: tuple,
                 state: TCBState::Listen,
                 socket: udp_sock,
-                seg_input: seg_input_rx,
-                send_input: send_input_rx,
-                recv_output: recv_output_tx,
+                data_input: data_input_rx,
+                byte_output: byte_output_tx,
 
                 send_buffer: VecDeque::new(),
                 send_window: VecDeque::new(),
@@ -71,9 +69,8 @@ impl TCB {
 
                 unacked_segs: VecDeque::new(),
             },
-            seg_input_tx,
-            send_input_tx, // Call send_tx.send() to send bytes over tcp
-            recv_output_rx, // Call recv_rx.recv() to get the bytes sent over tcp
+            data_input_tx,
+            byte_output_rx,
         )
     }
 
@@ -96,21 +93,39 @@ impl TCB {
             syn.set_seq(self.seq_base);
             self.unacked_segs.push_back(syn);
         }
-        while self.state != TCBState::Closed {
-            let seg = self.seg_input.recv().unwrap(); // TODO: Deal with timeout
-            self.handle_shake(&seg);
-            // Handle ack including handling syn retransmit when timeout
+        'event_loop: while self.state != TCBState::Closed {
+            match self.data_input.recv_timeout(Duration::from_secs(TIMEOUT)) {
+                Ok(input) => {
+                    match input {
+                        TCBInput::Receive(seg) => self.handle_seg(seg),
+                        TCBInput::Send(data) => self.handle_data(data),
+                    }
+                }
+                Err(e) if e == RecvTimeoutError::Timeout => {
+                    self.handle_timeout();
+                }
+                Err(_) => panic!(),
+            }
         }
     }
 
-    fn send_syn(&mut self) {}
+    fn handle_data(&mut self, data: Vec<u8>) {}
+    fn handle_seg(&mut self, seg: Segment) {
+        // handle FIN
+        self.handle_shake(&seg);
+        self.handle_acks(&seg);
+        self.handle_payload(&seg);
+    }
+
+    fn handle_payload(&self, seg: &Segment) {}
+    fn handle_acks(&mut self, seg: &Segment) {}
 
     fn handle_shake(&mut self, seg: &Segment) {
         match self.state {
             TCBState::Listen => {
                 if seg.get_flag(Flag::SYN) {
                     self.state = TCBState::SynRecd;
-                    self.ack_base = seg.seq_num() + 1;
+                    self.ack_base = seg.seq_num().wrapping_add(1);
                     let mut synack = self.make_seg();
                     synack.set_flag(Flag::SYN);
                     synack.set_flag(Flag::ACK);
@@ -123,8 +138,8 @@ impl TCB {
             TCBState::SynSent => {
                 if seg.get_flag(Flag::SYN) && seg.get_flag(Flag::ACK) {
                     self.state = TCBState::Estab;
-                    self.ack_base = seg.seq_num() + 1;
-                    assert_eq!(seg.ack_num(), self.seq_base + 1); // TODO: What do here?
+                    self.ack_base = seg.seq_num().wrapping_add(1);
+                    assert_eq!(seg.ack_num(), self.seq_base.wrapping_add(1)); // TODO: What do here?
                     let mut ack = self.make_seg();
                     ack.set_flag(Flag::ACK);
                     ack.set_ack_num(self.ack_base);
@@ -139,6 +154,14 @@ impl TCB {
             }
             TCBState::Estab => {}
             TCBState::Closed => {}
+        }
+    }
+
+
+    fn handle_timeout(&mut self) {
+        match self.unacked_segs.front() {
+            Some(ref seg) => self.resend_seg(&seg),
+            _ => {}
         }
     }
 

@@ -2,6 +2,7 @@ use std::net::*;
 use segment::*;
 use std::time::{SystemTime, Duration};
 use std::cmp::min;
+use utils::*;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum TCBEvent {
@@ -62,10 +63,6 @@ pub struct TCB {
 const WINDOW_SIZE: usize = 5;
 const MAX_PAYLOAD_SIZE: usize = 2;
 
-
-fn wrapping_range_check((l, r): (u32, u32), num: u32) -> bool {
-    (r < l && (num >= l || num < r)) || (num >= l && num < r)
-}
 
 impl TCB {
     pub fn new(tuple: TCPTuple, sock: UdpSocket) -> TCB {
