@@ -124,7 +124,7 @@ impl TCB {
                         if seg.get_flag(Flag::FIN) {
                             return Err(());
                         }
-                        let inrange = wrapping_range_check(
+                        let inrange = in_wrapped_range(
                             (
                                 self.seq_base.wrapping_add(1),
                                 self.seq_base.wrapping_add((WINDOW_SIZE + 1) as u32),
@@ -179,7 +179,7 @@ impl TCB {
             //            println!("Received seg: {:?}", seg);
 
             let max_ack = self.ack_base.wrapping_add(WINDOW_SIZE as u32);
-            if wrapping_range_check((self.ack_base, max_ack), seg.seq_num()) {
+            if in_wrapped_range((self.ack_base, max_ack), seg.seq_num()) {
                 let window_index_base = seg.seq_num().wrapping_sub(self.ack_base) as usize;
                 for (i, byte) in seg.payload().iter().enumerate() {
                     self.recv_window[window_index_base + i] = Some(*byte);

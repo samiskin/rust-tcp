@@ -27,6 +27,7 @@ pub struct TCPTuple {
 }
 
 
+#[derive(Debug)]
 pub enum TCBInput {
     Receive(Segment),
     Send(Vec<u8>),
@@ -88,37 +89,62 @@ impl TCB {
 
     fn run_tcp(&mut self, send_syn: bool) {
         if send_syn {
-            let mut syn = self.make_seg();
-            syn.set_flag(Flag::SYN);
-            syn.set_seq(self.seq_base);
-            self.unacked_segs.push_back(syn);
+            self.send_syn();
         }
         'event_loop: while self.state != TCBState::Closed {
-            match self.data_input.recv_timeout(Duration::from_secs(TIMEOUT)) {
-                Ok(input) => {
-                    match input {
-                        TCBInput::Receive(seg) => self.handle_seg(seg),
-                        TCBInput::Send(data) => self.handle_data(data),
-                    }
+            self.handle_input_recv();
+        }
+    }
+
+    fn send_syn(&mut self) {
+        let mut syn = self.make_seg();
+        syn.set_flag(Flag::SYN);
+        syn.set_seq(self.seq_base);
+        self.send_seg(syn);
+        self.state = TCBState::SynSent;
+    }
+
+    fn handle_input_recv(&mut self) {
+        match self.data_input.recv_timeout(Duration::from_secs(TIMEOUT)) {
+            Ok(input) => {
+                match input {
+                    TCBInput::Receive(seg) => self.handle_seg(seg),
+                    TCBInput::Send(data) => self.handle_data(data),
                 }
-                Err(e) if e == RecvTimeoutError::Timeout => {
-                    self.handle_timeout();
-                }
-                Err(_) => panic!(),
             }
+            Err(e) if e == RecvTimeoutError::Timeout => {
+                self.handle_timeout();
+            }
+            Err(e) => panic!(e),
         }
     }
 
     fn handle_data(&mut self, data: Vec<u8>) {}
     fn handle_seg(&mut self, seg: Segment) {
         // handle FIN
-        self.handle_shake(&seg);
+        if seg.get_flag(Flag::FIN) {
+            self.state = TCBState::Closed;
+            return;
+        }
         self.handle_acks(&seg);
+        self.handle_shake(&seg);
         self.handle_payload(&seg);
     }
 
     fn handle_payload(&self, seg: &Segment) {}
-    fn handle_acks(&mut self, seg: &Segment) {}
+    fn handle_acks(&mut self, seg: &Segment) {
+        let ack_lb = self.seq_base.wrapping_add(1);
+        let ack_ub = ack_lb.wrapping_add(WINDOW_SIZE as u32);
+        if seg.get_flag(Flag::ACK) && in_wrapped_range((ack_lb, ack_ub), seg.ack_num()) {
+            self.seq_base = seg.ack_num();
+            self.unacked_segs.retain(|unacked_seg: &Segment| {
+                unacked_seg.seq_num() >= seg.ack_num()
+            });
+
+            // Handle payload data, only valid after Estab
+            if self.state == TCBState::Estab {}
+        }
+    }
 
     fn handle_shake(&mut self, seg: &Segment) {
         match self.state {
@@ -131,7 +157,6 @@ impl TCB {
                     synack.set_flag(Flag::ACK);
                     synack.set_seq(self.seq_base);
                     synack.set_ack_num(self.ack_base);
-
                     self.send_seg(synack);
                 }
             }
@@ -139,17 +164,18 @@ impl TCB {
                 if seg.get_flag(Flag::SYN) && seg.get_flag(Flag::ACK) {
                     self.state = TCBState::Estab;
                     self.ack_base = seg.seq_num().wrapping_add(1);
-                    assert_eq!(seg.ack_num(), self.seq_base.wrapping_add(1)); // TODO: What do here?
                     let mut ack = self.make_seg();
                     ack.set_flag(Flag::ACK);
                     ack.set_ack_num(self.ack_base);
                     self.send_ack(ack);
+                    println!("Client ESTAB");
                 }
             }
             TCBState::SynRecd => {
                 // TODO: Verify what seq num should be here
                 if seg.get_flag(Flag::ACK) {
                     self.state = TCBState::Estab;
+                    println!("Server ESTAB");
                 }
             }
             TCBState::Estab => {}
@@ -189,6 +215,68 @@ impl TCB {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+
+    type TcbTup = (TCB, Sender<TCBInput>, Receiver<u8>);
+    fn tcb_pair() -> (TcbTup, TcbTup, UdpSocket, UdpSocket) {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_tuple = TCPTuple {
+            src: server_sock.local_addr().unwrap(),
+            dst: client_sock.local_addr().unwrap(),
+        };
+        let client_tuple = TCPTuple {
+            src: client_sock.local_addr().unwrap(),
+            dst: server_sock.local_addr().unwrap(),
+        };
+        let server_tuple = TCB::new(server_tuple, server_sock.try_clone().unwrap());
+        let client_tuple = TCB::new(client_tuple, client_sock.try_clone().unwrap());
+        (server_tuple, client_tuple, server_sock, client_sock)
+    }
+
+    fn sock_recv(sock: &UdpSocket) -> Segment {
+        let mut buf = vec![0; (1 << 16) - 1];
+        let (amt, _) = sock.recv_from(&mut buf).unwrap();
+        let buf = Vec::from(&mut buf[..amt]);
+        Segment::from_buf(buf)
+    }
+
+    #[test]
+    fn full_handshake() {
+        let (server_tuple, client_tuple, server_sock, client_sock) = tcb_pair();
+        let (mut server_tcb, server_input, _) = server_tuple;
+        let (mut client_tcb, client_input, _) = client_tuple;
+
+        let server_thread = thread::spawn(move || {
+            server_tcb.handle_input_recv();
+            assert_eq!(server_tcb.state, TCBState::SynRecd);
+            server_tcb.handle_input_recv();
+            assert_eq!(server_tcb.state, TCBState::Estab);
+        });
+
+        let client_thread = thread::spawn(move || {
+            client_tcb.send_syn();
+            assert_eq!(client_tcb.state, TCBState::SynSent);
+            client_tcb.handle_input_recv();
+            assert_eq!(client_tcb.state, TCBState::Estab);
+        });
+
+        let client_syn: Segment = sock_recv(&server_sock);
+        assert!(client_syn.get_flag(Flag::SYN));
+        server_input.send(TCBInput::Receive(client_syn)).unwrap();
+
+        let server_synack: Segment = sock_recv(&client_sock);
+        assert!(server_synack.get_flag(Flag::SYN));
+        assert!(server_synack.get_flag(Flag::ACK));
+        client_input.send(TCBInput::Receive(server_synack)).unwrap();
+
+        let client_ack: Segment = sock_recv(&server_sock);
+        assert!(client_ack.get_flag(Flag::ACK));
+        server_input.send(TCBInput::Receive(client_ack)).unwrap();
+
+        server_thread.join().unwrap();
+        client_thread.join().unwrap();
+    }
 }
 
 

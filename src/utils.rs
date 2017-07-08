@@ -22,6 +22,6 @@ pub fn u32_to_u8(v: u32) -> Vec<u8> {
         .collect::<Vec<u8>>()
 }
 
-pub fn wrapping_range_check((l, r): (u32, u32), num: u32) -> bool {
+pub fn in_wrapped_range((l, r): (u32, u32), num: u32) -> bool {
     (r < l && (num >= l || num < r)) || (num >= l && num < r)
 }
