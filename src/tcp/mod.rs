@@ -43,6 +43,7 @@ pub struct TCB {
 
     pub send_buffer: VecDeque<u8>, // Data to be sent that hasn't been
     pub send_window: VecDeque<u8>,
+    pub recv_window: VecDeque<Option<u8>>,
 
     pub seq_base: u32,
     pub ack_base: u32,
@@ -64,6 +65,7 @@ impl TCB {
 
                 send_buffer: VecDeque::new(),
                 send_window: VecDeque::new(),
+                recv_window: VecDeque::from(vec![Option::None; WINDOW_SIZE]),
 
                 seq_base: 1,
                 ack_base: 1,
@@ -111,6 +113,9 @@ impl TCB {
     }
 
     fn fill_send_window(&mut self) {
+        if self.state != TCBState::Estab {
+            return;
+        }
         let orig_window_len = self.send_window.len();
         let send_amt = min(self.send_buffer.len(), WINDOW_SIZE - orig_window_len);
         self.send_window.extend(
@@ -146,7 +151,54 @@ impl TCB {
         self.handle_payload(&seg); // receiver
     }
 
-    fn handle_payload(&self, seg: &Segment) {}
+    fn handle_payload(&mut self, seg: &Segment) {
+        if self.state != TCBState::Estab {
+            return;
+        }
+        let seq_lb = self.ack_base;
+        let seq_ub = seq_lb.wrapping_add(WINDOW_SIZE as u32);
+        if in_wrapped_range((seq_lb, seq_ub), seg.seq_num()) {
+            let window_index_base = seg.seq_num().wrapping_sub(self.ack_base) as usize;
+            for (i, byte) in seg.payload().iter().enumerate() {
+                self.recv_window[window_index_base + i] = Some(*byte);
+            }
+        } else if seg.payload().len() > 0 {
+            println!(
+                "\x1b[31m Seq {} out of range (expected {}), ignoring\x1b[0m",
+                seg.seq_num(),
+                self.ack_base
+            );
+        }
+
+        if seg.seq_num() == self.ack_base {
+            loop {
+                match self.recv_window.front() {
+                    Some(opt) => {
+                        match *opt {
+                            Some(byte) => self.byte_output.send(byte).unwrap(),
+                            None => break,
+                        }
+                    }
+                    _ => break,
+                }
+                self.ack_base += 1;
+                self.recv_window.pop_front();
+                self.recv_window.push_back(None);
+            }
+            let mut ack = self.make_seg();
+            ack.set_flag(Flag::ACK);
+            ack.set_ack_num(self.ack_base);
+            // TODO: Delayed ack
+            self.send_ack(ack);
+        } else if !seg.get_flag(Flag::ACK) {
+            println!(
+                "\x1b[32m Out of order Seq {} (expected {}), ignoring\x1b[0m",
+                seg.seq_num(),
+                self.ack_base
+            );
+        }
+    }
+
     fn handle_acks(&mut self, seg: &Segment) {
         let ack_lb = self.seq_base.wrapping_add(1);
         let ack_ub = ack_lb.wrapping_add(WINDOW_SIZE as u32);
@@ -155,14 +207,15 @@ impl TCB {
                 unacked_seg.seq_num() >= seg.ack_num()
             });
 
+            let num_acked_bytes = seg.ack_num().wrapping_sub(self.seq_base) as usize;
+            self.seq_base = seg.ack_num();
+
             // Handle payload data, only valid after Estab
             if self.state == TCBState::Estab {
-                let num_acked_bytes = seg.ack_num().wrapping_sub(self.seq_base) as usize;
                 self.send_window.drain(..num_acked_bytes);
                 self.fill_send_window();
             }
 
-            self.seq_base = seg.ack_num();
         }
     }
 
@@ -188,14 +241,16 @@ impl TCB {
                     ack.set_flag(Flag::ACK);
                     ack.set_ack_num(self.ack_base);
                     self.send_ack(ack);
-                    println!("Client ESTAB");
+                    self.fill_send_window();
+                    // println!("Client ESTAB");
                 }
             }
             TCBState::SynRecd => {
                 // TODO: Verify what seq num should be here
                 if seg.get_flag(Flag::ACK) {
                     self.state = TCBState::Estab;
-                    println!("Server ESTAB");
+                    self.fill_send_window();
+                    // println!("Server ESTAB");
                 }
             }
             TCBState::Estab => {}
@@ -351,6 +406,7 @@ mod tests {
         for _ in 0..((data_len as f64 / MAX_PAYLOAD_SIZE as f64).ceil() as u32) {
             segments.push(sock_recv(&client_sock));
         }
+
         let mut ack = client_tcb.make_seg();
         ack.set_flag(Flag::ACK);
         ack.set_ack_num(segments[1].seq_num());
@@ -358,6 +414,49 @@ mod tests {
         server_tcb.handle_input_recv();
         let next_seg = sock_recv(&client_sock);
         assert_eq!(next_seg.payload(), str.into_bytes());
+    }
+
+    #[test]
+    fn e2e_test() {
+        let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+        let (mut server_tcb, server_input, server_output) = server_tuple;
+        let (mut client_tcb, client_input, client_output) = client_tuple;
+
+        let server_client_sender = client_input.clone();
+        let server_message_passer = thread::spawn(move || loop {
+            let seg = sock_recv(&client_sock);
+            // println!("\x1b[33m Server->Client {:?} \x1b[0m", seg);
+            server_client_sender.send(TCBInput::Receive(seg)).unwrap();
+        });
+
+        let client_server_sender = server_input.clone();
+        let client_message_passer = thread::spawn(move || loop {
+            let seg = sock_recv(&server_sock);
+            // println!("\x1b[35m Client->Server {:?} \x1b[0m", seg);
+            client_server_sender.send(TCBInput::Receive(seg)).unwrap();
+        });
+
+        let server = thread::spawn(move || loop {
+            server_tcb.handle_input_recv();
+        });
+
+        client_tcb.send_syn();
+        let client = thread::spawn(move || loop {
+            client_tcb.handle_input_recv();
+        });
+
+        let text = String::from("Did you ever hear the tragedy of Darth Plagueis the wise?");
+        let data = text.clone().into_bytes();
+        server_input.send(TCBInput::Send(data)).unwrap();
+
+        let mut buf = vec![];
+        while buf.len() < text.len() {
+            buf.extend(client_output.recv());
+        }
+
+        assert_eq!(String::from_utf8(buf).unwrap(), text);
+
+
     }
 }
 
