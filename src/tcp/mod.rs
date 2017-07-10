@@ -77,7 +77,19 @@ impl TCB {
         )
     }
 
-    fn run_tcp(&mut self, send_syn: bool) {
+    pub fn recv(out: &Receiver<u8>, amt: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(amt as usize);
+        while buf.len() < amt as usize {
+            buf.extend(out.recv());
+        }
+        buf
+    }
+
+    pub fn close(&mut self) {
+        // TODO
+    }
+
+    pub fn run_tcp(&mut self, send_syn: bool) {
         if send_syn {
             self.send_syn();
         }
@@ -288,12 +300,12 @@ impl TCB {
 
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::thread;
 
     type TcbTup = (TCB, Sender<TCBInput>, Receiver<u8>);
-    fn tcb_pair() -> (TcbTup, TcbTup, UdpSocket, UdpSocket) {
+    pub fn tcb_pair() -> (TcbTup, TcbTup, UdpSocket, UdpSocket) {
         let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_tuple = TCPTuple {
@@ -316,7 +328,7 @@ mod tests {
         Segment::from_buf(buf)
     }
 
-    fn perform_handshake(
+    pub fn perform_handshake(
         server_tuple: &mut TcbTup,
         client_tuple: &mut TcbTup,
         server_sock: &UdpSocket,
@@ -416,34 +428,45 @@ mod tests {
         assert_eq!(next_seg.payload(), str.into_bytes());
     }
 
-    #[test]
-    fn e2e_test() {
-        let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+    pub fn run_e2e_pair<F1, F2>(
+        server_fn: F1,
+        client_fn: F2,
+    ) -> ((Sender<TCBInput>, Receiver<u8>), ((Sender<TCBInput>), Receiver<u8>))
+    where
+        F1: FnOnce(TCB) -> () + Send + 'static,
+        F2: FnOnce(TCB) -> () + Send + 'static,
+    {
+        let (server_tuple, client_tuple, server_sock, client_sock) = tcb_pair();
         let (mut server_tcb, server_input, server_output) = server_tuple;
         let (mut client_tcb, client_input, client_output) = client_tuple;
 
         let server_client_sender = client_input.clone();
-        let server_message_passer = thread::spawn(move || loop {
+        let _server_message_passer = thread::spawn(move || loop {
             let seg = sock_recv(&client_sock);
             // println!("\x1b[33m Server->Client {:?} \x1b[0m", seg);
             server_client_sender.send(TCBInput::Receive(seg)).unwrap();
         });
 
         let client_server_sender = server_input.clone();
-        let client_message_passer = thread::spawn(move || loop {
+        let _client_message_passer = thread::spawn(move || loop {
             let seg = sock_recv(&server_sock);
             // println!("\x1b[35m Client->Server {:?} \x1b[0m", seg);
             client_server_sender.send(TCBInput::Receive(seg)).unwrap();
         });
 
-        let server = thread::spawn(move || loop {
-            server_tcb.handle_input_recv();
-        });
+        let _server = thread::spawn(move || server_fn(server_tcb));
+        let _client = thread::spawn(move || client_fn(client_tcb));
 
-        client_tcb.send_syn();
-        let client = thread::spawn(move || loop {
-            client_tcb.handle_input_recv();
-        });
+        ((server_input, server_output), (client_input, client_output))
+    }
+
+    #[test]
+    fn e2e_test() {
+        let ((server_input, _), (_, client_output)) =
+            run_e2e_pair(
+                |mut server_tcb: TCB| server_tcb.run_tcp(false),
+                |mut client_tcb: TCB| client_tcb.run_tcp(true),
+            );
 
         let text = String::from("Did you ever hear the tragedy of Darth Plagueis the wise?");
         let data = text.clone().into_bytes();
