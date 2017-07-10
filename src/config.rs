@@ -1,9 +1,10 @@
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Config {
     pub port: u16,
-    pub filepath: String,
+    pub filepath: PathBuf,
 }
 
 impl Config {
@@ -21,7 +22,7 @@ impl Config {
 
         Ok(Config {
             port: port,
-            filepath: filepath,
+            filepath: PathBuf::from(filepath),
         })
     }
 }

@@ -1,6 +1,5 @@
 use segment::*;
 use std::net::*;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::*;
 use std::collections::VecDeque;
 use std::cmp::*;
@@ -29,6 +28,7 @@ pub struct TCPTuple {
 
 #[derive(Debug)]
 pub enum TCBInput {
+    SendSyn,
     Receive(Segment),
     Send(Vec<u8>),
     Close,
@@ -86,10 +86,7 @@ impl TCB {
         buf
     }
 
-    pub fn run_tcp(&mut self, send_syn: bool) {
-        if send_syn {
-            self.send_syn();
-        }
+    pub fn run_tcp(&mut self) {
         'event_loop: while self.state != TCBState::Closed {
             self.handle_input_recv();
         }
@@ -107,6 +104,7 @@ impl TCB {
         match self.data_input.recv_timeout(Duration::from_secs(TIMEOUT)) {
             Ok(input) => {
                 match input {
+                    TCBInput::SendSyn => self.send_syn(),
                     TCBInput::Receive(seg) => self.handle_seg(seg),
                     TCBInput::Send(data) => {
                         self.send_buffer.extend(data);
@@ -308,8 +306,8 @@ pub mod tests {
 
     type TcbTup = (TCB, Sender<TCBInput>, Receiver<u8>);
     pub fn tcb_pair() -> (TcbTup, TcbTup, UdpSocket, UdpSocket) {
-        let server_sock = UdpSocket::bind("127.0.0.1:12345").unwrap();
-        let client_sock = UdpSocket::bind("127.0.0.1:54321").unwrap();
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_tuple = TCPTuple {
             src: server_sock.local_addr().unwrap(),
             dst: client_sock.local_addr().unwrap(),
@@ -470,11 +468,13 @@ pub mod tests {
 
     #[test]
     fn e2e_test() {
-        let ((server_input, _, _), (_, client_output, _)) =
+        let ((server_input, _, _), (client_input, client_output, _)) =
             run_e2e_pair(
-                |mut server_tcb: TCB| server_tcb.run_tcp(false),
-                |mut client_tcb: TCB| client_tcb.run_tcp(true),
+                |mut server_tcb: TCB| server_tcb.run_tcp(),
+                |mut client_tcb: TCB| client_tcb.run_tcp(),
             );
+
+        client_input.send(TCBInput::SendSyn).unwrap();
 
         let text = String::from("Did you ever hear the tragedy of Darth Plagueis the wise?");
         let data = text.clone().into_bytes();
@@ -490,52 +490,3 @@ pub mod tests {
 
     }
 }
-
-
-/*
-recv_buffer: MessageQueue<u8>
-send_buffer: Box<[u8]>
-
-recv() {
-   take from recv buffer, block if empty
-}
-
-send() {
-   append to send buffer
-   send_until_window_full()
-}
-
-TCPThread
-
-while state != CLOSED {
-   seg = recv()
-   if seg(SYN)
-      setup ack_base, seq_base
-
-// Handle handshake
-   run handshake state machine
-
-// Handle send
-   if seg(ACK) && acknum in send_range
-   {
-      move send_window (taking from send_buffer)
-      move send_base
-   }
-
-// Handle Receive
-   if seq in receive_range {
-      fill receive_window
-   }
-
-   if seq == ack_base {
-      put completed segments in receive buffer
-      move ack_base
-      move window
-
-      if payload.size > 0{
-         send ack with ack_base
-         TODO delayed ack
-      }
-   }
-}
-*/

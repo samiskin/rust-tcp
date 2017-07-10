@@ -133,37 +133,23 @@ impl Segment {
 
     pub fn to_byte_vec(&self) -> Vec<u8> {
         let mut set = u16_to_u8(self.src_port);
-        set.extend(u16_to_u8(self.dst_port).iter());
-        set.extend(u32_to_u8(self.seg_size).iter());
-        set.extend(u32_to_u8(self.seq_num).iter());
-        set.extend(u32_to_u8(self.ack_num).iter());
-        set.extend(u16_to_u8(self.flags).iter());
-        set.extend(u16_to_u8(self.checksum).iter());
+        set.extend(u16_to_u8(self.dst_port));
+        set.extend(u32_to_u8(self.seg_size));
+        set.extend(u32_to_u8(self.seq_num));
+        set.extend(u32_to_u8(self.ack_num));
+        set.extend(u16_to_u8(self.flags));
+        set.extend(u16_to_u8(self.checksum));
         set.extend(self.payload.clone().iter());
 
         set
     }
-
-    fn u8_to_u16_vec(v: &mut Vec<u8>) -> Vec<u16> {
-        if v.len() % 2 == 1 {
-            v.push(0u8);
-        }
-        v.iter()
-            .zip(v.iter().skip(1))
-            .enumerate()
-            .filter(|&(i, _)| i % 2 == 0)
-            .map(|(_, p)| p)
-            .map(|(a, b)| ((*a as u16) << 8) | (*b as u16))
-            .collect::<Vec<u16>>()
-    }
-
 
     pub fn generate_checksum(&self) -> u16 {
         let mut bytes = self.to_byte_vec();
         bytes = bytes.iter().take(18).map(|x| *x).collect(); // Skip checksum field
         bytes.extend(self.payload.clone().iter());
 
-        let checksum_pairs = Segment::u8_to_u16_vec(&mut bytes);
+        let checksum_pairs = u8_to_u16_vec(&mut bytes);
         let mut sum = checksum_pairs.iter().fold(0u32, |acc, x| {
             let sum = (0u32 | (*x as u32)) + acc;
             (sum % (1 << 16)) + (sum / (1 << 15))
