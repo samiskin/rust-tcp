@@ -15,7 +15,7 @@ use std::sync::mpsc::{Sender, Receiver, channel};
 use std::fs::File;
 
 
-fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
+fn get_file(tuple: &TCPTuple, folder: String) -> Result<(File, String), std::io::Error> {
     let filename = format!(
         "{}.{}.{}.{}",
         tuple.dst.ip(),
@@ -25,43 +25,68 @@ fn get_file(tuple: &TCPTuple, folder: String) -> Result<File, std::io::Error> {
     );
 
     let filepath = format!("{}/{}", folder, filename);
-    let file_result = if let Ok(file) = File::open(filepath.clone()) {
-        Ok(file)
+    let file = if let Ok(file) = File::open(filepath.clone()) {
+        file
     } else {
         File::create(filepath.clone()).unwrap();
-        File::open(filepath.clone())
+        File::open(filepath.clone())?
     };
 
-    file_result
+    Ok((file, filename))
 }
 
-fn _send_str(tcb_input: Sender<TCBInput>, s: String) {
+fn _send_str(tcb_input: &Sender<TCBInput>, s: String) {
     let len: u32 = s.len() as u32;
     let mut bytes = u32_to_u8(len);
     bytes.extend(s.into_bytes());
     tcb_input.send(TCBInput::Send(bytes)).unwrap();
 }
 
-fn _recv_str(tcb_output: Receiver<u8>) -> String {
+fn _recv_str(tcb_output: &Receiver<u8>) -> String {
     let size = buf_to_u32(&TCB::recv(&tcb_output, 4)[..]);
     String::from_utf8(TCB::recv(&tcb_output, size)).unwrap()
 }
 
-fn run_tcb(config: Config, tuple: TCPTuple, rx: Receiver<Segment>, socket: UdpSocket) {
-    let (mut tcb, input, output) = TCB::new(tuple, socket.try_clone().unwrap());
-    let mut file = if let Ok(file) = get_file(&tuple, config.filepath) {
-        file
-    } else {
-        tcb.close();
-        return;
-    };
+fn run_server_tcb(config: Config, tuple: TCPTuple, input: Sender<TCBInput>, output: Receiver<u8>) {
+    let (mut file, filepath): (std::fs::File, String) =
+        if let Ok((file, filepath)) = get_file(&tuple, config.filepath) {
+            (file, filepath)
+        } else {
+            input.send(TCBInput::Close).unwrap();
+            return;
+        };
+
     let mut s = String::new();
     file.read_to_string(&mut s).unwrap();
+    _send_str(&input, s);
+    drop(file);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(filepath)
+        .unwrap();
+
+    loop {
+        let data = _recv_str(&output);
+        file.write_all(&data.as_bytes()).unwrap();
+        _send_str(&input, data);
+    }
+    file.sync_all().unwrap();
+}
+
+fn run_client_tcb(config: Config, tuple: TCPTuple, input: Sender<TCBInput>, output: Receiver<u8>) {
+    let file_contents = _recv_str(&output);
+    println!("Got file: {}", file_contents);
+    let response = String::from("It's not a story the jedi would tell you");
+    _send_str(&input, response);
+    let ack = _recv_str(&output);
+    println!("Got ack: {}", ack);
 }
 
 fn multiplexed_receive(
     config: &Config,
-    channels: &mut HashMap<TCPTuple, Sender<Segment>>,
+    channels: &mut HashMap<TCPTuple, Sender<TCBInput>>,
     socket: &UdpSocket,
 ) -> Result<(), ()> {
     let mut buf = vec![0; (1 << 16) - 1];
@@ -76,16 +101,19 @@ fn multiplexed_receive(
                 };
                 match channels.entry(tuple) {
                     Entry::Occupied(entry) => {
-                        entry.into_mut().send(seg).unwrap();
+                        entry.into_mut().send(TCBInput::Receive(seg)).unwrap();
                     }
                     Entry::Vacant(v) => {
                         println!("New connection! {:?}", tuple);
-                        let (tx, rx) = channel();
-                        tx.send(seg).unwrap();
-                        v.insert(tx);
-                        let socket = socket.try_clone().unwrap();
+                        let (mut tcb, input, output) = TCB::new(tuple, socket.try_clone().unwrap());
+                        let udp_sender = input.clone();
+                        udp_sender.send(TCBInput::Receive(seg)).unwrap();
+                        v.insert(udp_sender);
                         let config = config.clone();
-                        std::thread::spawn(move || { run_tcb(config, tuple, rx, socket); });
+                        std::thread::spawn(move || tcb.run_tcp(false));
+                        std::thread::spawn(
+                            move || { run_server_tcb(config, tuple, input, output); },
+                        );
                     }
                 }
             }
@@ -99,7 +127,7 @@ fn multiplexed_receive(
 pub fn run_server(config: config::Config) -> Result<(), ()> {
     println!("Starting Server...");
 
-    let mut channels: HashMap<TCPTuple, Sender<Segment>> = HashMap::new();
+    let mut channels: HashMap<TCPTuple, Sender<TCBInput>> = HashMap::new();
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", config.port)).unwrap();
 
     'event_loop: loop {
@@ -134,7 +162,7 @@ mod tests {
             src: "127.0.0.1:54321".parse().unwrap(),
             dst: "127.0.0.1:12345".parse().unwrap(),
         };
-        let mut file = get_file(&tuple, config().filepath).unwrap();
+        let (mut file, _) = get_file(&tuple, config().filepath).unwrap();
         let mut s = String::new();
         file.read_to_string(&mut s).unwrap();
         println!("Got file of length {}", s.len());
@@ -144,18 +172,55 @@ mod tests {
 
     #[test]
     fn transfer_data() {
-        let ((server_input, server_output), (client_input, client_output)) =
+        let ((server_input, server_output, _), (client_input, client_output, _)) =
             tcp::tests::run_e2e_pair(
                 |mut server_tcb: TCB| server_tcb.run_tcp(false),
                 |mut client_tcb: TCB| client_tcb.run_tcp(true),
             );
 
-        _send_str(server_input, String::from(SCRIPT));
-        let output = _recv_str(client_output);
+        _send_str(&server_input, String::from(SCRIPT));
+        let output = _recv_str(&client_output);
         assert_eq!(output, String::from(SCRIPT));
 
-        _send_str(client_input, String::from(SCRIPT));
-        let output = _recv_str(server_output);
+        _send_str(&client_input, String::from(SCRIPT));
+        let output = _recv_str(&server_output);
         assert_eq!(output, String::from(SCRIPT));
+    }
+
+    #[test]
+    fn file_echo_test() {
+        let ((server_input, server_output, server_sock),
+             (client_input, client_output, client_sock)) =
+            tcp::tests::run_e2e_pair(
+                |mut server_tcb: TCB| server_tcb.run_tcp(false),
+                |mut client_tcb: TCB| client_tcb.run_tcp(true),
+            );
+
+        let server_tuple = TCPTuple {
+            src: server_sock.local_addr().unwrap(),
+            dst: client_sock.local_addr().unwrap(),
+        };
+        let client_tuple = TCPTuple {
+            src: client_sock.local_addr().unwrap(),
+            dst: server_sock.local_addr().unwrap(),
+        };
+        let server_config = Config {
+            port: server_sock.local_addr().unwrap().port(),
+            filepath: String::from("./"),
+        };
+        let client_config = Config {
+            port: client_sock.local_addr().unwrap().port(),
+            filepath: String::from("./"),
+        };
+
+        let _server = std::thread::spawn(move || {
+            run_server_tcb(server_config, server_tuple, server_input, server_output);
+        });
+
+        let _client = std::thread::spawn(move || {
+            run_client_tcb(client_config, client_tuple, client_input, client_output);
+        });
+
+        _client.join();
     }
 }
