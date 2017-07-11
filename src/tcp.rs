@@ -132,7 +132,7 @@ impl TCB {
             self.send_buffer.iter().take(send_amt),
         );
         let data_to_send = self.send_buffer.drain(..send_amt).collect::<Vec<u8>>();
-        let next_seq = self.seq_base + orig_window_len as u32;
+        let next_seq = self.seq_base.wrapping_add(orig_window_len as u32);
         self.send_data(data_to_send, next_seq);
     }
 
@@ -189,7 +189,7 @@ impl TCB {
                     }
                     _ => break,
                 }
-                self.ack_base += 1;
+                self.ack_base = self.ack_base.wrapping_add(1);
                 self.recv_window.pop_front();
                 self.recv_window.push_back(None);
             }
@@ -289,7 +289,6 @@ impl TCB {
     }
 
     fn send_seg(&mut self, seg: Segment) {
-        assert!(seg.seq_num() >= self.seq_base);
         self.resend_seg(&seg);
         self.unacked_segs.push_back(seg);
     }
@@ -403,6 +402,7 @@ pub mod tests {
     #[test]
     fn send_test() {
         let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+        server_tuple.0.seq_base = u32::max_value() - 2; // Test wrapping around u32 boundaries
         perform_handshake(
             &mut server_tuple,
             &mut client_tuple,

@@ -39,3 +39,6 @@ pub fn u8_to_u16_vec(v: &mut Vec<u8>) -> Vec<u16> {
 pub fn in_wrapped_range((l, r): (u32, u32), num: u32) -> bool {
     (r < l && (num >= l || num < r)) || (num >= l && num < r)
 }
+
+#[cfg(tests)]
+mod tests {}
