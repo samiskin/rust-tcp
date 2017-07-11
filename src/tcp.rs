@@ -111,7 +111,7 @@ impl TCB {
                         self.fill_send_window();
                     }
                     TCBInput::Close => {
-                        self.handle_close();
+                        self.send_close();
                     }
                 }
             }
@@ -151,14 +151,12 @@ impl TCB {
     }
 
     fn handle_seg(&mut self, seg: Segment) {
-        if seg.get_flag(Flag::FIN) {
-            // TODO: Handle close properly
-            self.state = TCBState::Closed;
-            return;
-        }
         self.handle_acks(&seg); // sender
         self.handle_shake(&seg);
         self.handle_payload(&seg); // receiver
+        if seg.get_flag(Flag::FIN) {
+            self.handle_close();
+        }
     }
 
     fn handle_payload(&mut self, seg: &Segment) {
@@ -268,7 +266,15 @@ impl TCB {
 
 
     fn handle_close(&mut self) {
-        // TODO
+        self.state = TCBState::Closed;
+    }
+
+    fn send_close(&mut self) {
+        let mut fin = self.make_seg();
+        fin.set_flag(Flag::FIN);
+        fin.set_seq(self.seq_base);
+        self.send_seg(fin);
+        self.state = TCBState::Closed;
     }
 
     fn handle_timeout(&mut self) {
@@ -337,7 +343,8 @@ pub mod tests {
         let (ref mut server_tcb, ref server_input, _) = *server_tuple;
         let (ref mut client_tcb, ref client_input, _) = *client_tuple;
 
-        client_tcb.send_syn();
+        client_input.send(TCBInput::SendSyn).unwrap();
+        client_tcb.handle_input_recv();
         assert_eq!(client_tcb.state, TCBState::SynSent);
 
         let client_syn: Segment = sock_recv(&server_sock);
@@ -467,7 +474,7 @@ pub mod tests {
     }
 
     #[test]
-    fn e2e_test() {
+    fn send_recv_test() {
         let ((server_input, _, _), (client_input, client_output, _)) =
             run_e2e_pair(
                 |mut server_tcb: TCB| server_tcb.run_tcp(),
@@ -486,7 +493,28 @@ pub mod tests {
         }
 
         assert_eq!(String::from_utf8(buf).unwrap(), text);
+    }
 
+    #[test]
+    fn close_test() {
+        let (mut server_tuple, mut client_tuple, server_sock, client_sock) = tcb_pair();
+        perform_handshake(
+            &mut server_tuple,
+            &mut client_tuple,
+            &server_sock,
+            &client_sock,
+        );
 
+        let (mut server_tcb, server_input, _) = server_tuple;
+        let (mut client_tcb, client_input, _) = client_tuple;
+
+        client_input.send(TCBInput::Close).unwrap();
+        client_tcb.handle_input_recv();
+        let client_fin = sock_recv(&server_sock);
+        server_input.send(TCBInput::Receive(client_fin)).unwrap();
+        server_tcb.handle_input_recv();
+
+        assert_eq!(server_tcb.state, TCBState::Closed);
+        assert_eq!(client_tcb.state, TCBState::Closed);
     }
 }
