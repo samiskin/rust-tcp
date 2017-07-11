@@ -78,12 +78,12 @@ impl TCB {
         )
     }
 
-    pub fn recv(out: &Receiver<u8>, amt: u32) -> Vec<u8> {
+    pub fn recv(out: &Receiver<u8>, amt: u32) -> Result<Vec<u8>, RecvError> {
         let mut buf = Vec::with_capacity(amt as usize);
         while buf.len() < amt as usize {
-            buf.extend(out.recv());
+            buf.push(out.recv()?);
         }
-        buf
+        Ok(buf)
     }
 
     pub fn run_tcp(&mut self) {
@@ -452,7 +452,9 @@ pub mod tests {
         let _server_message_passer = thread::spawn(move || loop {
             let seg = sock_recv(&server_client_sock);
             // println!("\x1b[33m Server->Client {:?} \x1b[0m", seg);
-            server_client_sender.send(TCBInput::Receive(seg)).unwrap();
+            if server_client_sender.send(TCBInput::Receive(seg)).is_err() {
+                break;
+            }
         });
 
         let client_server_sender = server_input.clone();
@@ -460,7 +462,9 @@ pub mod tests {
         let _client_message_passer = thread::spawn(move || loop {
             let seg = sock_recv(&client_server_sock);
             // println!("\x1b[35m Client->Server {:?} \x1b[0m", seg);
-            client_server_sender.send(TCBInput::Receive(seg)).unwrap();
+            if client_server_sender.send(TCBInput::Receive(seg)).is_err() {
+                break;
+            }
         });
 
         let _server = thread::spawn(move || server_fn(server_tcb));
