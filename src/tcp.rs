@@ -213,7 +213,6 @@ impl TCB {
         let ack_lb = self.seq_base.wrapping_add(1);
         let ack_ub = ack_lb.wrapping_add(WINDOW_SIZE as u32);
         if seg.get_flag(Flag::ACK) && in_wrapped_range((ack_lb, ack_ub), seg.ack_num()) {
-            println!("Got ack in range with num {}", seg.seq_num());
             self.unacked_segs.retain(|unacked_seg: &Segment| {
                 in_wrapped_range(
                     (
@@ -237,9 +236,10 @@ impl TCB {
 
         let dupe_ack_lb = self.seq_base.wrapping_sub((WINDOW_SIZE - 1) as u32);
         let dupe_ack_ub = dupe_ack_lb.wrapping_add(WINDOW_SIZE as u32);
-        if seg.get_flag(Flag::ACK) && in_wrapped_range((dupe_ack_lb, dupe_ack_ub), seg.seq_num()) {
+        if self.state == TCBState::Estab && seg.get_flag(Flag::ACK) &&
+            in_wrapped_range((dupe_ack_lb, dupe_ack_ub), seg.seq_num())
+        {
             self.dupe_acks += 1;
-            println!("\x1b[31m Duplicate ACK {} Received\x1b[0m", self.dupe_acks);
             if self.dupe_acks >= 3 {
                 self.handle_resend();
                 self.dupe_acks = 0;

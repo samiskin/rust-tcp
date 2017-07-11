@@ -1,4 +1,3 @@
-
 pub fn buf_to_u16(buf: &[u8]) -> u16 {
     (buf[0] as u16) << 8 | (buf[1] as u16)
 }

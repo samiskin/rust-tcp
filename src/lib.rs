@@ -1,5 +1,5 @@
-pub mod tcp;
 pub mod utils;
+pub mod tcp;
 pub mod segment;
 pub mod config;
 use tcp::*;
@@ -172,6 +172,21 @@ mod tests {
         assert_eq!(output, String::from(SCRIPT));
     }
 
+    fn get_tuples_from_socks(
+        server_sock: &UdpSocket,
+        client_sock: &UdpSocket,
+    ) -> (TCPTuple, TCPTuple) {
+        let server_tuple = TCPTuple {
+            src: server_sock.local_addr().unwrap(),
+            dst: client_sock.local_addr().unwrap(),
+        };
+        let client_tuple = TCPTuple {
+            src: client_sock.local_addr().unwrap(),
+            dst: server_sock.local_addr().unwrap(),
+        };
+        (server_tuple, client_tuple)
+    }
+
     #[test]
     fn file_echo_test() {
         let ((server_input, server_output, server_sock),
@@ -181,14 +196,8 @@ mod tests {
                 |mut client_tcb: TCB| client_tcb.run_tcp(),
             );
 
-        let server_tuple = TCPTuple {
-            src: server_sock.local_addr().unwrap(),
-            dst: client_sock.local_addr().unwrap(),
-        };
-        let _client_tuple = TCPTuple {
-            src: client_sock.local_addr().unwrap(),
-            dst: server_sock.local_addr().unwrap(),
-        };
+        let (server_tuple, _) = get_tuples_from_socks(&server_sock, &client_sock);
+
         let server_config = Config {
             port: server_sock.local_addr().unwrap().port(),
             filepath: PathBuf::from("./"),
@@ -214,7 +223,11 @@ mod tests {
 
         // NOTE: Sometimes the write doesn't actually succeed even though both flush and sync_data
         //       are called, so this assertion might fail...  just re-run the test if it does
-        assert_eq!(file_contents, initial_contents);
+        assert_eq!(
+            file_contents,
+            initial_contents,
+            "\n\x1b[35m NOTE: This test may not have actually failed, try re-running \x1b[0m"
+        );
 
         let response = String::from("It's not a story the jedi would tell you");
         send_str(&client_input, response.clone()).unwrap();
@@ -228,5 +241,30 @@ mod tests {
         assert!(client_input.send(TCBInput::Close).is_err());
 
         std::fs::remove_file(filepath.clone()).unwrap();
+    }
+
+    #[test]
+    #[ignore] // Reliant on existance of root_only_dir which is owned by root with permissions 700
+    fn server_close_test() {
+        let ((server_input, server_output, server_sock),
+             (client_input, client_output, client_sock)) =
+            tcp::tests::run_e2e_pair(
+                |mut server_tcb: TCB| server_tcb.run_tcp(),
+                |mut client_tcb: TCB| client_tcb.run_tcp(),
+            );
+
+        let (server_tuple, _) = get_tuples_from_socks(&server_sock, &client_sock);
+
+        let server_config = Config {
+            port: server_sock.local_addr().unwrap().port(),
+            filepath: PathBuf::from("./root_only_dir/"),
+        };
+
+        let _server = std::thread::spawn(move || {
+            run_server_tcb(server_config, server_tuple, server_input, server_output);
+        });
+
+        client_input.send(TCBInput::SendSyn).unwrap();
+        assert!(client_output.recv().is_err());
     }
 }
