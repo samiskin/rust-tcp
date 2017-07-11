@@ -350,7 +350,7 @@ pub mod tests {
     fn sock_recv(sock: &UdpSocket) -> Segment {
         let mut buf = vec![0; (1 << 16) - 1];
         let (amt, _) = sock.recv_from(&mut buf).unwrap();
-        let buf = Vec::from(&mut buf[..amt]);
+        buf.truncate(amt);
         Segment::from_buf(buf)
     }
 

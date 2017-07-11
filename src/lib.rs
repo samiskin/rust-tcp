@@ -86,7 +86,7 @@ fn multiplexed_receive(
     let mut buf = vec![0; (1 << 16) - 1];
     match socket.recv_from(&mut buf) {
         Ok((amt, src)) => {
-            let buf = Vec::from(&mut buf[..amt]);
+            buf.truncate(amt);
             let seg = Segment::from_buf(buf);
             if seg.validate() {
                 let tuple = TCPTuple {
