@@ -36,20 +36,21 @@ pub enum TCBInput {
 
 #[derive(Debug)]
 pub struct TCB {
-    pub tuple: TCPTuple,
-    pub state: TCBState,
-    pub socket: UdpSocket,
-    pub data_input: Receiver<TCBInput>,
-    pub byte_output: Sender<u8>,
+    tuple: TCPTuple,
+    state: TCBState,
+    socket: UdpSocket,
+    data_input: Receiver<TCBInput>,
+    byte_output: Sender<u8>,
 
-    pub send_buffer: VecDeque<u8>, // Data to be sent that hasn't been
-    pub send_window: VecDeque<u8>,
-    pub recv_window: VecDeque<Option<u8>>,
+    send_buffer: VecDeque<u8>, // Data to be sent that hasn't been
+    send_window: VecDeque<u8>,
+    recv_window: VecDeque<Option<u8>>,
 
-    pub seq_base: u32,
-    pub ack_base: u32,
+    seq_base: u32,
+    ack_base: u32,
 
-    pub unacked_segs: VecDeque<Segment>,
+    unacked_segs: VecDeque<Segment>,
+    dupe_acks: u32,
 }
 
 impl TCB {
@@ -72,6 +73,7 @@ impl TCB {
                 ack_base: 1,
 
                 unacked_segs: VecDeque::new(),
+                dupe_acks: 0,
             },
             data_input_tx,
             byte_output_rx,
@@ -116,7 +118,7 @@ impl TCB {
                 }
             }
             Err(e) if e == RecvTimeoutError::Timeout => {
-                self.handle_timeout();
+                self.handle_resend();
             }
             Err(e) => panic!(e),
         }
@@ -211,8 +213,15 @@ impl TCB {
         let ack_lb = self.seq_base.wrapping_add(1);
         let ack_ub = ack_lb.wrapping_add(WINDOW_SIZE as u32);
         if seg.get_flag(Flag::ACK) && in_wrapped_range((ack_lb, ack_ub), seg.ack_num()) {
+            println!("Got ack in range with num {}", seg.seq_num());
             self.unacked_segs.retain(|unacked_seg: &Segment| {
-                unacked_seg.seq_num() >= seg.ack_num()
+                in_wrapped_range(
+                    (
+                        seg.ack_num(),
+                        seg.ack_num().wrapping_add(WINDOW_SIZE as u32),
+                    ),
+                    unacked_seg.seq_num(),
+                )
             });
 
             let num_acked_bytes = seg.ack_num().wrapping_sub(self.seq_base) as usize;
@@ -224,6 +233,18 @@ impl TCB {
                 self.fill_send_window();
             }
 
+        }
+
+        let dupe_ack_lb = self.seq_base.wrapping_sub((WINDOW_SIZE - 1) as u32);
+        let dupe_ack_ub = dupe_ack_lb.wrapping_add(WINDOW_SIZE as u32);
+        if seg.get_flag(Flag::ACK) && in_wrapped_range((dupe_ack_lb, dupe_ack_ub), seg.seq_num()) {
+            self.dupe_acks += 1;
+            println!("\x1b[31m Duplicate ACK {} Received\x1b[0m", self.dupe_acks);
+            if self.dupe_acks >= 3 {
+                self.handle_resend();
+                self.dupe_acks = 0;
+                println!("\x1b[31m Triple Duplicate ACK! Resending \x1b[0m");
+            }
         }
     }
 
@@ -277,7 +298,7 @@ impl TCB {
         self.state = TCBState::Closed;
     }
 
-    fn handle_timeout(&mut self) {
+    fn handle_resend(&mut self) {
         match self.unacked_segs.front() {
             Some(ref seg) => self.resend_seg(&seg),
             _ => {}
@@ -416,7 +437,7 @@ pub mod tests {
         let data_len = WINDOW_SIZE;
         let str = String::from("Ok");
         assert!(str.len() <= MAX_PAYLOAD_SIZE);
-        let mut data = vec![5; data_len];
+        let mut data = (0..data_len).map(|r| r as u8).collect::<Vec<u8>>();
         data.extend(str.clone().into_bytes());
         server_input.send(TCBInput::Send(data)).unwrap();
         server_tcb.handle_input_recv();
@@ -433,6 +454,21 @@ pub mod tests {
         server_tcb.handle_input_recv();
         let next_seg = sock_recv(&client_sock);
         assert_eq!(next_seg.payload(), str.into_bytes());
+
+        // Check for Duplicate ACK resends
+        for _ in 0..5 {
+            let mut ack = client_tcb.make_seg();
+            ack.set_flag(Flag::ACK);
+            ack.set_ack_num(segments[1].seq_num());
+            server_input.send(TCBInput::Receive(ack)).unwrap();
+            server_tcb.handle_input_recv();
+        }
+
+        let next_seg = sock_recv(&client_sock);
+        assert_eq!(next_seg.seq_num(), segments[1].seq_num());
+
+        let next_seg = sock_recv(&client_sock);
+        assert_eq!(next_seg.seq_num(), segments[1].seq_num());
     }
 
     pub fn run_e2e_pair<F1, F2>(
