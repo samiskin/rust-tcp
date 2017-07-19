@@ -122,7 +122,7 @@ pub fn run_server(config: Config) -> Result<(), ()> {
     println!("Starting Server...");
 
     let mut channels: HashMap<TCPTuple, Sender<TCBInput>> = HashMap::new();
-    let socket = UdpSocket::bind(format!("127.0.0.1:{}", config.port)).unwrap();
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.port)).unwrap();
 
     'event_loop: loop {
         multiplexed_receive(&config, &mut channels, &socket)?;
