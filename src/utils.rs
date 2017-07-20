@@ -36,5 +36,35 @@ pub fn in_wrapped_range((l, r): (u32, u32), num: u32) -> bool {
     (r < l && (num >= l || num < r)) || (num >= l && num < r)
 }
 
+pub fn ones_complement_sum(mut bytes: &mut Vec<u8>) -> u16 {
+    // let mut bytes = self.to_byte_vec();
+    // bytes = bytes.iter().map(|x| *x).collect();
+    println!("Bytes: {:?}", bytes);
+
+    let checksum_pairs = u8_to_u16_vec(&mut bytes);
+    let mut i = 0;
+    println!("      9876543210987654321");
+    let sum = checksum_pairs.iter().fold(0u32, |acc, x| {
+        let sum = (0u32 | (*x as u32)) + acc;
+        println!("   Num: {:17b}", x);
+        println!("Sum {:2}: {:17b}", i, sum);
+        i += 1;
+        if sum >= (1 << 16) {
+            println!(
+                "Sum {:2}: {:17b} ({:17b} + {:17b})",
+                i,
+                (sum % (1 << 16)) + (sum / (1 << 16)),
+                sum % (1 << 16),
+                sum / (1 << 16)
+            );
+            i += 1;
+        }
+        let sum = (sum % (1 << 16)) + (sum / (1 << 16));
+        let sum = (sum % (1 << 16)) + (sum / (1 << 16));
+        sum
+    }) as u16;
+
+    sum
+}
 #[cfg(tests)]
 mod tests {}

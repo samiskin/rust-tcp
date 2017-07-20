@@ -144,16 +144,11 @@ impl Segment {
         set
     }
 
-    pub fn generate_checksum(&self) -> u16 {
-        let mut bytes = self.to_byte_vec();
-        bytes = bytes.iter().take(18).map(|x| *x).collect(); // Skip checksum field
-        bytes.extend(self.payload.clone().iter());
 
-        let checksum_pairs = u8_to_u16_vec(&mut bytes);
-        let mut sum = checksum_pairs.iter().fold(0u32, |acc, x| {
-            let sum = (0u32 | (*x as u32)) + acc;
-            (sum % (1 << 16)) + (sum / (1 << 15))
-        }) as u16;
+    pub fn generate_checksum(&mut self) -> u16 {
+        self.checksum = 0;
+        let mut bytes = self.to_byte_vec();
+        let mut sum = ones_complement_sum(&mut bytes);
 
         if sum == 0 {
             sum = !sum;
@@ -162,7 +157,8 @@ impl Segment {
     }
 
     pub fn validate(&self) -> bool {
-        self.checksum == self.generate_checksum()
+        let mut bytes = self.to_byte_vec();
+        ones_complement_sum(&mut bytes) == 0xFFFF
     }
 }
 
@@ -198,6 +194,83 @@ mod tests {
         assert!(seg.validate());
         seg.flags |= 0b00010;
         assert!(!seg.validate());
+    }
+
+    #[test]
+    fn checksum_tpp() {
+        let mut bytes = vec![
+            147,
+            162,
+            39,
+            35,
+            0,
+            0,
+            0,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            128,
+            0,
+            68,
+            166,
+        ];
+        println!("TPP: {:17b}", ones_complement_sum(&mut bytes));
+        let seg = Segment::from_buf(bytes);
+        // println!("{:17b} == {:17b}", seg.checksum, seg.generate_checksum());
+        assert!(seg.validate());
+    }
+
+    #[test]
+    fn checksum_handout() {
+        let mut bytes: Vec<u8> = vec![
+            0b00001100,
+            0b00001000,
+            0b00010000,
+            0b00001000, //| Source Port | Dest. Port
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00010111, //| Segment Size (23 bytes)
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000011, //| Sequence Number
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000011, //| Acknowledgement Number
+            0b01000000,
+            0b00000000,
+            0b01001111,
+            0b01111100, //| Flags | Checksum
+            0b01010101,
+            0b01010101,
+            0b11111111,
+        ];
+        println!("TPP: {:17b}", ones_complement_sum(&mut bytes));
+        let seg = Segment::from_buf(bytes);
+        assert!(seg.validate());
+    }
+
+    #[test]
+    fn checksum_website() {
+        let mut bytes: Vec<u8> = vec![
+            0b10000110,
+            0b01011110,
+            0b10101100,
+            0b01100000,
+            0b01110001,
+            0b00101010,
+            0b10000001,
+            0b10110101,
+        ];
+        assert_eq!(ones_complement_sum(&mut bytes), 0b0010010110011111);
     }
 
     #[test]
