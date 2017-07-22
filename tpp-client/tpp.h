@@ -48,8 +48,25 @@ struct tpphdr {
 	U16	th_checksum;	// checksum
 };
 
+struct tpphdr_u16 {
+	U16	th_sport;	// source port
+	U16	th_dport;	// destination port
+	U32	th_sz_seg;	// segment size
+	U32	th_seq;		// sequence number
+	U32	th_ack;		// ack number
+	U16	th_flags;	// SYN, ACK, FIN , unused
+#define TH_SYN_U16 0x8000
+#define TH_ACK_U16 0x4000
+#define TH_FIN_U16 0x2000
+	U16	th_checksum;	// checksum
+};
+
 #define TPPHDR_LEN sizeof(struct tpphdr)	// tpp header size in bytes
 
+/*
+ *  Default maximum segment size for TPP.
+ */ 
+#define TPP_MSS (1500 - 60 -8) // (MTU - max_IP_header_size - UDP_header_size) 
 // host byte order assumed
 extern void display_tpphdr(struct tpphdr *p);
 extern void init_seg_hdr_h(struct tpphdr *p, U16 n_sport, U16 n_dport); 
@@ -62,5 +79,10 @@ extern void set_seg_checksum_h(struct tpphdr *p, U16 checksum);
 // byte order conversion functions
 extern void hton_seg(void *buf);
 extern void ntoh_seg(void *buf);
+
+// checksum routines
+unsigned short checksum_seg_h(void *buf); // compute the tpp segment checksum, bytes in buf is in host byte order
+int verify_checksum_seg_h(void *buf); // verify the tpp segment checksum, bytes in buf is in host byte order
+int verify_checksum_seg_n(void *buf); // verify the tpp segment checksum, bytes in buf is in network byte order
 
 #endif // TPP_H_

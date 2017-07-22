@@ -46,7 +46,7 @@ void create_SYN_h(struct tpphdr *p) {
 	set_seg_seq_h(p, g_client_tcb.iss); 
 	set_seg_flags_h(p, TH_SYN);
 
-	checksum = checksum1((const char *)p, p->th_sz_seg);	
+	checksum = checksum_seg_h((void *)p);	
 	set_seg_checksum_h(p, checksum); 
 }
 
@@ -62,7 +62,7 @@ void create_ACK_h(struct tpphdr *p)
 	set_seg_ack_h(p, g_client_tcb.rcv_nxt);
 	set_seg_flags_h(p, TH_ACK);
 
-	checksum = checksum1((const char *)p, p->th_sz_seg);	
+	checksum = checksum_seg_h((void *)p);	
 	set_seg_checksum_h(p, checksum); 
 }
 
@@ -137,7 +137,7 @@ int client_fsm(void *buf, size_t len)
 int process_segment_client(void *buf, size_t len) {
 
 	// checksum verification 
-	if (!verify_checksum1((const char *)buf, (unsigned int) len)) {
+	if (!verify_checksum_seg_h(buf)) {
 		fprintf(stderr, "process_segement_client(): incorrect checksum segment received. \n");
 		// extra error handling to be implemented
 		return -1;
