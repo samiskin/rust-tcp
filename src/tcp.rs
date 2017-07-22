@@ -6,8 +6,8 @@ use std::cmp::*;
 use std::time::Duration;
 use utils::*;
 
-const WINDOW_SIZE: usize = 5;
-const MAX_PAYLOAD_SIZE: usize = 2;
+const WINDOW_SIZE: usize = 10000;
+const MAX_PAYLOAD_SIZE: usize = 1500;
 const TIMEOUT: u64 = 1; // In seconds
 
 #[derive(Debug, Copy, Clone, PartialEq)]
