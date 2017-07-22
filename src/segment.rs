@@ -217,11 +217,12 @@ mod tests {
             0,
             128,
             0,
-            68,
-            166,
+            197,
+            37,
         ];
         println!("TPP: {:17b}", ones_complement_sum(&mut bytes));
         let seg = Segment::from_buf(bytes);
+        println!("{:?}", seg);
         // println!("{:17b} == {:17b}", seg.checksum, seg.generate_checksum());
         assert!(seg.validate());
     }
