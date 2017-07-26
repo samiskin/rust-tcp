@@ -6,7 +6,7 @@ use std::cmp::*;
 use std::time::Duration;
 use utils::*;
 
-const WINDOW_SIZE: usize = 10000;
+const WINDOW_SIZE: usize = 65000;
 const MAX_PAYLOAD_SIZE: usize = 1500;
 const TIMEOUT: u64 = 1; // In seconds
 
@@ -153,6 +153,7 @@ impl TCB {
     }
 
     fn handle_seg(&mut self, seg: Segment) {
+        // println!("Got seg: {:?}", seg);
         self.handle_acks(&seg); // sender
         self.handle_shake(&seg);
         self.handle_payload(&seg); // receiver
@@ -173,11 +174,11 @@ impl TCB {
                 self.recv_window[window_index_base + i] = Some(*byte);
             }
         } else if seg.payload().len() > 0 {
-            println!(
-                "\x1b[31m Seq {} out of range (expected {}), ignoring\x1b[0m",
-                seg.seq_num(),
-                self.ack_base
-            );
+            // println!(
+            //     "\x1b[31m Seq {} out of range (expected {}), ignoring\x1b[0m",
+            //     seg.seq_num(),
+            //     self.ack_base
+            // );
         }
 
         if seg.seq_num() == self.ack_base {
@@ -201,11 +202,11 @@ impl TCB {
             // TODO: Delayed ack
             self.send_ack(ack);
         } else if !seg.get_flag(Flag::ACK) {
-            println!(
-                "\x1b[32m Out of order Seq {} (expected {}), ignoring\x1b[0m",
-                seg.seq_num(),
-                self.ack_base
-            );
+            // println!(
+            //     "\x1b[32m Out of order Seq {} (expected {}), ignoring\x1b[0m",
+            //     seg.seq_num(),
+            //     self.ack_base
+            // );
         }
     }
 
@@ -243,7 +244,7 @@ impl TCB {
             if self.dupe_acks >= 3 {
                 self.handle_resend();
                 self.dupe_acks = 0;
-                println!("\x1b[31m Triple Duplicate ACK! Resending \x1b[0m");
+                // println!("\x1b[31m Triple Duplicate ACK! Resending \x1b[0m");
             }
         }
     }

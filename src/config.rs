@@ -26,3 +26,27 @@ impl Config {
         })
     }
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ClientConfig {
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+impl ClientConfig {
+    pub fn new(mut args: env::Args) -> Result<ClientConfig, &'static str> {
+        args.next(); // skip the filename
+        let src_port = match args.next() {
+            Some(arg) => arg.parse::<u16>().unwrap(),
+            None => return Err("Didn't get port"),
+        };
+        let dst_port = match args.next() {
+            Some(arg) => arg.parse::<u16>().unwrap(),
+            None => return Err("Didn't get port"),
+        };
+        Ok(ClientConfig {
+            src_port: src_port,
+            dst_port: dst_port,
+        })
+    }
+}
